@@ -15,8 +15,28 @@ upstream's own ``if b != 0`` loop does. This generator injects the same stream i
 the *unmodified* upstream module by swapping the module's ``os`` reference, so
 upstream still assembles the PKCS#1 block and the AES-CBC ciphertext itself.
 
+The signature vectors (``vectors/sign.json``) come from the same unmodified tree:
+
+* ``header[]``  -- ``core/crypto.py`` ``NetSecClient.encrypt_request`` wrapped by
+  ``core/client.py`` ``build_headers`` (``headerSign`` is the compact JSON of the
+  ``{d,h,k,p,t}`` wire dict). The generator pins the three random sources of
+  ``encrypt_request`` -- the request AES key (``params.aesKey`` is fixed by config),
+  the ``keyDataOne..Four`` segments (derived from a UUID, pinned from the vector's
+  ``kdfSalt``) and ``time.time()`` (pinned to the vector's ``timeStamp`` header) --
+  and the PKCS#1 padding stream (same swap as above), so upstream still assembles
+  every byte itself. Upstream appends ``ABCDEFGHIJKLMN12`` to the 32-char UUID, so a
+  vector ``kdfSalt`` necessarily ends with ``ABCDEFGH``.
+* ``token[]``   -- ``core/crypto.py`` ``compute_token_sign`` over the single ``token``
+  entry the Kotlin interface exposes.
+* ``settlement[]`` -- ``running/builder.py`` ``compute_sport_signature`` over 31-field
+  ``sign_map``s; the emitted ``fields`` are the ``k=v`` strings of upstream's own
+  ``compute_original_sign`` (so value formatting/bool lowercasing is upstream's).
+  ``running/`` is loaded as a synthetic package so ``running/__init__.py`` (which
+  pulls in the Python>=3.12-only ``client.py`` f-string) is never imported.
+
 Run: python tools/gen-vectors.py
 Out: core/src/test/resources/vectors/netsec.json
+     core/src/test/resources/vectors/sign.json
 """
 
 import base64
@@ -24,11 +44,15 @@ import importlib.util
 import itertools
 import json
 import sys
+import types
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-UPSTREAM_CRYPTO = ROOT / "reference" / "upstream" / "协议" / "7.3.92" / "core" / "crypto.py"
+UPSTREAM = ROOT / "reference" / "upstream" / "协议" / "7.3.92"
+UPSTREAM_CRYPTO = UPSTREAM / "core" / "crypto.py"
+UPSTREAM_RUNNING = UPSTREAM / "running"
 OUT_FILE = ROOT / "core" / "src" / "test" / "resources" / "vectors" / "netsec.json"
+SIGN_FILE = ROOT / "core" / "src" / "test" / "resources" / "vectors" / "sign.json"
 
 RSA_MODULUS_BYTES = 128  # upstream REQ RSA key is 1024-bit (core/crypto.py NetSecClient)
 
@@ -141,6 +165,278 @@ def netsec_cases(crypto):
     return cases
 
 
+def load_upstream_running(running_dir):
+    """Load running/{models,consistency,config,builder} without running/__init__.py.
+
+    running/__init__.py imports running/client.py, whose f-string uses PEP 701 syntax
+    (Python >= 3.12). A synthetic package keeps the suite unpatched.
+    """
+    if not running_dir.is_dir():
+        sys.exit("missing upstream running package: %s" % running_dir)
+    package = types.ModuleType("upstream_running")
+    package.__path__ = [str(running_dir)]
+    sys.modules["upstream_running"] = package
+    for name in ("models", "consistency", "config", "builder"):
+        path = running_dir / (name + ".py")
+        if not path.is_file():
+            sys.exit("missing upstream running module: %s" % path)
+        spec = importlib.util.spec_from_file_location("upstream_running." + name, str(path))
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["upstream_running." + name] = module
+        spec.loader.exec_module(module)
+    return sys.modules["upstream_running.builder"]
+
+
+class _FixedUuid(object):
+    """``str(uuid.uuid4())`` stand-in; upstream strips dashes from it."""
+
+    def __init__(self, text):
+        self._text = text
+
+    def __str__(self):
+        return self._text
+
+
+class _FixedUuidModule(object):
+    def __init__(self, text):
+        self._text = text
+
+    def uuid4(self):
+        return _FixedUuid(self._text)
+
+
+class _FixedRandom(object):
+    """``random.choice`` stand-in driving upstream's per-request AES key."""
+
+    def __init__(self, chars):
+        self._chars = list(chars)
+        self._index = 0
+
+    def choice(self, seq=None):
+        char = self._chars[self._index]
+        self._index += 1
+        return char
+
+
+class _FixedTime(object):
+    def __init__(self, seconds):
+        self._seconds = seconds
+
+    def time(self):
+        return self._seconds
+
+
+def inner_timestamp_ms(seconds):
+    return int(seconds) * 1000
+
+
+def header_case(crypto, name, headers, aes_key, kdf_salt, seconds):
+    """One upstream ``encrypt_request`` round producing the exact headerSign value."""
+    if len(aes_key) != 16:
+        raise ValueError("aesKey must be 16 bytes")
+    if len(kdf_salt) != 40:
+        raise ValueError("kdfSalt must be the four 10-byte keyData segments (40 bytes)")
+    # upstream: candidate = str(uuid.uuid4()).replace("-", "") + "ABCDEFGHIJKLMN12"
+    if kdf_salt[32:] != b"ABCDEFGH":
+        raise ValueError("kdfSalt must end with the upstream fixed UUID suffix ABCDEFGH")
+    if str(headers.get("timeStamp")) != str(inner_timestamp_ms(seconds)):
+        raise ValueError("headers.timeStamp must be the millisecond form of %d" % seconds)
+
+    client = crypto.NetSecClient()
+    results = []
+    for _ in range(2):
+        stream = itertools.cycle(kdf_seed(crypto, kdf_salt))
+        real_uuid, real_random, real_time, real_os = (
+            crypto.uuid, crypto.random, crypto.time, crypto.os)
+        crypto.uuid = _FixedUuidModule(kdf_salt[:32].decode("ascii"))
+        crypto.random = _FixedRandom(aes_key.decode("ascii"))
+        crypto.time = _FixedTime(seconds + 0.789)
+        crypto.os = _DeterministicOs(stream)
+        try:
+            headers_json = json.dumps(headers, separators=(",", ":"), ensure_ascii=False)
+            wire, _ = client.encrypt_request(headers_json)
+        finally:
+            crypto.uuid, crypto.random, crypto.time, crypto.os = (
+                real_uuid, real_random, real_time, real_os)
+        results.append((headers_json, json.dumps(wire, separators=(",", ":"))))
+    # Guard: no unpatched random/clock source may leak into the pinned headerSign.
+    if results[0] != results[1]:
+        raise AssertionError("headerSign is not reproducible for case %s" % name)
+    headers_json, header_sign = results[0]
+    return {
+        "name": name,
+        "headerOrder": list(headers.keys()),
+        "headers": headers,
+        "headersJson": headers_json,
+        "aesKeyHex": aes_key.hex(),
+        "kdfSaltHex": kdf_salt.hex(),
+        "rsaPublicKey": base64.b64encode(
+            crypto.base64.b64decode(crypto.REQ_RSA_PKCS1_B64)
+        ).decode("ascii"),
+        "headerSign": header_sign,
+    }
+
+
+def header_cases(crypto):
+    specs = [
+        (
+            "identity-headers",
+            {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "appVersion": "7.3.92",
+                "deviceName": "Android Device",
+                "DeviceId": "00000000000000000000000000000000",
+                "osVersion": "13",
+                "timeStamp": str(inner_timestamp_ms(1750123456)),
+                "nonce": "00000000-0000-4000-8000-000000000001",
+                "uid": "90001",
+                "token": "tok-header-case-1",
+            },
+            b"k1l2m3n4o5p6q7r8",
+            b"abcdefghijklmnopqrstuvwxyz012345ABCDEFGH",
+            1750123456,
+        ),
+        (
+            "utf8-header-values",
+            {
+                "appVersion": "7.3.92",
+                "deviceName": "安卓设备（测试）",
+                "campusName": "示例大学",
+                "timeStamp": str(inner_timestamp_ms(1760000001)),
+                "nonce": "00000000-0000-4000-8000-000000000002",
+                "uid": "90002",
+                "token": "tok-header-case-2",
+            },
+            b"a1b2c3d4e5f6g7h8",
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZ012345ABCDEFGH",
+            1760000001,
+        ),
+        (
+            "quoted-and-empty-headers",
+            {
+                "appVersion": "7.3.92",
+                "deviceName": "A\"B\\C",
+                "timeStamp": str(inner_timestamp_ms(1700000000)),
+                "nonce": "00000000-0000-4000-8000-000000000003",
+                "uid": "",
+                "token": "",
+            },
+            b"z9y8x7w6v5u4t3s2",
+            b"0123456789abcdefghijklmnopqrstuvABCDEFGH",
+            1700000000,
+        ),
+    ]
+    cases = []
+    for name, headers, aes_key, kdf_salt, seconds in specs:
+        # Same session sign_dict shape as upstream build_headers, so headerSign
+        # carries a real tokenSign value (the Kotlin tokenSign interface is narrower).
+        headers["tokenSign"] = crypto.compute_token_sign({
+            "timeStamp": headers["timeStamp"],
+            "token": headers["token"],
+            "uid": headers["uid"],
+        })
+        cases.append(header_case(crypto, name, headers, aes_key, kdf_salt, seconds))
+    return cases
+
+
+def token_cases(crypto):
+    salt = "2slhe02lsfiwowlcixisla_sls-_slaor"
+    specs = [
+        ("ascii-token", "tok-0123456789", salt),
+        ("empty-token", "", salt),
+        ("separator-chars-in-token", "tok&en=1?x", salt),
+        ("utf8-token-custom-salt", "令牌-测试", "custom-salt-测试"),
+    ]
+    return [
+        {
+            "name": name,
+            "token": token,
+            "salt": case_salt,
+            "sign": crypto.compute_token_sign({"token": token}, case_salt),
+        }
+        for name, token, case_salt in specs
+    ]
+
+
+def settlement_case(builder, name, sign_map, salt=None):
+    if salt is None:
+        salt = builder.SPORT_STATIC_SALT
+    signature = builder.compute_sport_signature(sign_map, salt)
+    original = builder.compute_original_sign(sign_map)
+    fields = original.split("&")
+    if any("&" in str(value) for value in sign_map.values()):
+        raise AssertionError("settlement vector values must not contain '&'")
+    return {
+        "name": name,
+        "salt": salt,
+        "fieldCount": len(fields),
+        "fields": fields,
+        "signature": signature,
+    }
+
+
+def settlement_cases(builder):
+    base = {
+        "address": "",
+        "avgPower": 150,
+        "avgStepFreq": 158,
+        "calorie": 135,
+        "complete": True,
+        "errorCode": 0,
+        "faceCheck": 0,
+        "geeToken": "",
+        "getPrize": False,
+        "goalId": "null",
+        "policy": 1,
+        "selDistance": 2000,
+        "selRunTime": 0,
+        "selectedUnid": 55001,
+        "speed": 2600,
+        "sportType": 1,
+        "startTime": 1750123456000,
+        "status": 1,
+        "stopTime": 1750124216000,
+        "themeId": 0,
+        "totalAscent": 0,
+        "totalDis": 2000,
+        "totalSteps": 1976,
+        "totalTime": 760,
+        "uid": 90001,
+        "unCompleteReason": 0,
+        "unauthorized": 0,
+        "useMobilityTools": 0,
+        "uuid": "0b9c2f8e-4b6a-4f1e-9d2c-7a5e3f1b8c4d",
+        "validDis": 2000,
+        "validTime": 760,
+    }
+    if len(base) != 31:
+        raise AssertionError("upstream settlement sign_map must have 31 fields")
+    incomplete = dict(base)
+    incomplete.update({
+        "complete": False,
+        "selDistance": 3000,
+        "totalDis": 2150,
+        "validDis": 1900,
+        "unCompleteReason": 10,
+        "goalId": "goal-42",
+        "geeToken": "gee-token-value",
+    })
+    mixed = {
+        "Address": "北京市海淀区",
+        "avgPower": 150,
+        "B": 2,
+        "a": 1,
+        "zeta": True,
+        "empty": "",
+    }
+    return [
+        settlement_case(builder, "31-fields-complete", base),
+        settlement_case(builder, "31-fields-incomplete", incomplete),
+        settlement_case(builder, "mixed-case-keys-custom-salt", mixed, "custom-salt-测试"),
+    ]
+
+
 def main():
     crypto = load_upstream(UPSTREAM_CRYPTO)
     payload = {
@@ -153,6 +449,28 @@ def main():
     OUT_FILE.parent.mkdir(parents=True, exist_ok=True)
     OUT_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print("wrote %s (%d cases)" % (OUT_FILE.relative_to(ROOT), len(payload["cases"])))
+
+    builder = load_upstream_running(UPSTREAM_RUNNING)
+    sign_payload = {
+        "source": "reference/upstream/协议/7.3.92/{core/crypto.py,core/client.py,running/builder.py}",
+        "generatedBy": "tools/gen-vectors.py",
+        "headerSign": "json({d,h,k,p,t}) from NetSecClient.encrypt_request(headersJson), "
+                      "h = md5(inner + '\\n'), keyData*/timeStamp pinned",
+        "tokenSign": "compute_token_sign({'token': token}, salt)",
+        "settlement": "compute_sport_signature(sign_map, salt); fields = k=v of "
+                      "compute_original_sign",
+        "header": header_cases(crypto),
+        "token": token_cases(crypto),
+        "settlement": settlement_cases(builder),
+    }
+    SIGN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SIGN_FILE.write_text(json.dumps(sign_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print("wrote %s (header=%d, token=%d, settlement=%d)" % (
+        SIGN_FILE.relative_to(ROOT),
+        len(sign_payload["header"]),
+        len(sign_payload["token"]),
+        len(sign_payload["settlement"]),
+    ))
 
 
 if __name__ == "__main__":

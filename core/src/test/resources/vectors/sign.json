@@ -1,0 +1,216 @@
+{
+  "source": "reference/upstream/协议/7.3.92/{core/crypto.py,core/client.py,running/builder.py}",
+  "generatedBy": "tools/gen-vectors.py",
+  "headerSign": "json({d,h,k,p,t}) from NetSecClient.encrypt_request(headersJson), h = md5(inner + '\\n'), keyData*/timeStamp pinned",
+  "tokenSign": "compute_token_sign({'token': token}, salt)",
+  "settlement": [
+    {
+      "name": "31-fields-complete",
+      "salt": "2slhe02lsfiwowlcixisla_sls-_slaor",
+      "fieldCount": 31,
+      "fields": [
+        "address=",
+        "avgPower=150",
+        "avgStepFreq=158",
+        "calorie=135",
+        "complete=true",
+        "errorCode=0",
+        "faceCheck=0",
+        "geeToken=",
+        "getPrize=false",
+        "goalId=null",
+        "policy=1",
+        "selDistance=2000",
+        "selRunTime=0",
+        "selectedUnid=55001",
+        "speed=2600",
+        "sportType=1",
+        "startTime=1750123456000",
+        "status=1",
+        "stopTime=1750124216000",
+        "themeId=0",
+        "totalAscent=0",
+        "totalDis=2000",
+        "totalSteps=1976",
+        "totalTime=760",
+        "uid=90001",
+        "unCompleteReason=0",
+        "unauthorized=0",
+        "useMobilityTools=0",
+        "uuid=0b9c2f8e-4b6a-4f1e-9d2c-7a5e3f1b8c4d",
+        "validDis=2000",
+        "validTime=760"
+      ],
+      "signature": "539ceca64a4bca0ae154087ada701285"
+    },
+    {
+      "name": "31-fields-incomplete",
+      "salt": "2slhe02lsfiwowlcixisla_sls-_slaor",
+      "fieldCount": 31,
+      "fields": [
+        "address=",
+        "avgPower=150",
+        "avgStepFreq=158",
+        "calorie=135",
+        "complete=false",
+        "errorCode=0",
+        "faceCheck=0",
+        "geeToken=gee-token-value",
+        "getPrize=false",
+        "goalId=goal-42",
+        "policy=1",
+        "selDistance=3000",
+        "selRunTime=0",
+        "selectedUnid=55001",
+        "speed=2600",
+        "sportType=1",
+        "startTime=1750123456000",
+        "status=1",
+        "stopTime=1750124216000",
+        "themeId=0",
+        "totalAscent=0",
+        "totalDis=2150",
+        "totalSteps=1976",
+        "totalTime=760",
+        "uid=90001",
+        "unCompleteReason=10",
+        "unauthorized=0",
+        "useMobilityTools=0",
+        "uuid=0b9c2f8e-4b6a-4f1e-9d2c-7a5e3f1b8c4d",
+        "validDis=1900",
+        "validTime=760"
+      ],
+      "signature": "b43adc90e564f1addb0c24f56f0ac99c"
+    },
+    {
+      "name": "mixed-case-keys-custom-salt",
+      "salt": "custom-salt-测试",
+      "fieldCount": 6,
+      "fields": [
+        "Address=北京市海淀区",
+        "B=2",
+        "a=1",
+        "avgPower=150",
+        "empty=",
+        "zeta=true"
+      ],
+      "signature": "f2419552b7ff121ad7446de0c43cc510"
+    }
+  ],
+  "header": [
+    {
+      "name": "identity-headers",
+      "headerOrder": [
+        "Accept",
+        "Content-Type",
+        "appVersion",
+        "deviceName",
+        "DeviceId",
+        "osVersion",
+        "timeStamp",
+        "nonce",
+        "uid",
+        "token",
+        "tokenSign"
+      ],
+      "headers": {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "appVersion": "7.3.92",
+        "deviceName": "Android Device",
+        "DeviceId": "00000000000000000000000000000000",
+        "osVersion": "13",
+        "timeStamp": "1750123456000",
+        "nonce": "00000000-0000-4000-8000-000000000001",
+        "uid": "90001",
+        "token": "tok-header-case-1",
+        "tokenSign": "5c7056ad05eccc1f739456604eb7e510"
+      },
+      "headersJson": "{\"Accept\":\"application/json\",\"Content-Type\":\"application/json\",\"appVersion\":\"7.3.92\",\"deviceName\":\"Android Device\",\"DeviceId\":\"00000000000000000000000000000000\",\"osVersion\":\"13\",\"timeStamp\":\"1750123456000\",\"nonce\":\"00000000-0000-4000-8000-000000000001\",\"uid\":\"90001\",\"token\":\"tok-header-case-1\",\"tokenSign\":\"5c7056ad05eccc1f739456604eb7e510\"}",
+      "aesKeyHex": "6b316c326d336e346f35703671377238",
+      "kdfSaltHex": "6162636465666768696a6b6c6d6e6f707172737475767778797a3031323334354142434445464748",
+      "rsaPublicKey": "MIGJAoGBALmmqVPOwY1mTVHGEfg7jHck1MNXsVtUfrqY99bm/W2cjLi3LvG/wMYwbhmf9O+y3CUlZ5g4AMd2Ly4XbWUloG/O8+1USGJ8ddmrzbl8j2EZi0OhpVCYI381+zZ0qa3z1cOuG2XdJnE7pO6Y4JNC37miqMXYmjejVi2QDIbONomfAgMBAAE=",
+      "headerSign": "{\"d\":\"IXkaTs61WvsJf1Mgmvf2V/r0dK7k+aAuJJ7OVIGbvaW+Xg2BQdyvvWKYSKxBrQhYOAbRWdzRp3DNtxpHJ5cLt00N151XF1sRTFh00JP0LO5Vsn9/pD7ZE4HeTyLw0FOVzPO3heO5NSeH4wb30DsrJquyfF0QeGP9tuI/pscDR2YtU+mNgxe8akixtRDrrWeO3JoLyvdvNW+z5rkCsc7OemFe65YofuBuMpB4+WH4VjiuW9GBMFcMiCkJocKEpJz1Dx5UJJ3xhgDvE74i+MjR5+DKsNAdcRSObx5oD52aBjWcTSaVGdCROFwE/etF+j9KL3DqWWLC1i/NdCDdVIrlBeUNClNu2EASSvOyXdi+mA77U1IXot0atzELCxQ0IO2ArHmB+SnLV99kB0Lr4IISE0naeI7V28Ax8UExfTWtTxiWhFnZiJ9jl/5Gg4jHlWifkNCDLWW+8Rs4egrp0JhmTqy0jqIQUCHJIRnw7XVXxBbydcLiT0kX/hnGwvPsirY7ElAErbZNMNSBnXQhy0eK9hT0MW02DCqhidMqoKszobYPdGdS/3zGwsbhMsfXkatyqzTNgj1j667Qbf0/ghG47pEzqKuSXhJ79C9EFc/9dg5ht49AWMKsPQcfBFkwiNtjJnWx+yHKFBYFuJNYaR2QsJPHTLHGD/0YbVTVeRZVCcjOju0deNSiPFSa8JXbodNcAlU4vyv5s0JFJSaHHAEJRqerxEF0pHpulavoe1wQJoh24E6/722ooJ1BglF1JOmUURRJB76UAij8inVRxZgfeDNF5cjkJ26/KFOxGcLr7vSCO4vMe+xKGGNgZYyYT+sR\",\"h\":\"26eff4e32e0069cb4e74121393461a10\",\"k\":\"GAb8mlSNXUG8tP5TxWvUIArT/ZJ9tl2D7qJSSWcF5KcPH2DwpaAbgW0PR02zvvormOzyvs7UHnj/tNfQDbK8lDGoh9fE2l/Hfyxx5VtBl8bMWFkWEmn+ro0YZS6qG3fih7cLbwCCByl42OtaHTd5OSaCVs64tZ9h53RL2Iz83Wg=\",\"p\":\"101\",\"t\":\"0\"}"
+    },
+    {
+      "name": "utf8-header-values",
+      "headerOrder": [
+        "appVersion",
+        "deviceName",
+        "campusName",
+        "timeStamp",
+        "nonce",
+        "uid",
+        "token",
+        "tokenSign"
+      ],
+      "headers": {
+        "appVersion": "7.3.92",
+        "deviceName": "安卓设备（测试）",
+        "campusName": "示例大学",
+        "timeStamp": "1760000001000",
+        "nonce": "00000000-0000-4000-8000-000000000002",
+        "uid": "90002",
+        "token": "tok-header-case-2",
+        "tokenSign": "aeff5ab0b868a7b96f23363d20fc98a8"
+      },
+      "headersJson": "{\"appVersion\":\"7.3.92\",\"deviceName\":\"安卓设备（测试）\",\"campusName\":\"示例大学\",\"timeStamp\":\"1760000001000\",\"nonce\":\"00000000-0000-4000-8000-000000000002\",\"uid\":\"90002\",\"token\":\"tok-header-case-2\",\"tokenSign\":\"aeff5ab0b868a7b96f23363d20fc98a8\"}",
+      "aesKeyHex": "61316232633364346535663667376838",
+      "kdfSaltHex": "4142434445464748494a4b4c4d4e4f505152535455565758595a3031323334354142434445464748",
+      "rsaPublicKey": "MIGJAoGBALmmqVPOwY1mTVHGEfg7jHck1MNXsVtUfrqY99bm/W2cjLi3LvG/wMYwbhmf9O+y3CUlZ5g4AMd2Ly4XbWUloG/O8+1USGJ8ddmrzbl8j2EZi0OhpVCYI381+zZ0qa3z1cOuG2XdJnE7pO6Y4JNC37miqMXYmjejVi2QDIbONomfAgMBAAE=",
+      "headerSign": "{\"d\":\"ZcmeGmi38gWlPUIcAt72Czrn1f8gBjj8bLJCiL63h9ILBujrjxhnoQDVdjeZmL1KnzjPR8SVp7xS5JeLiPY2f4vUz2237hofGBMo84F9PXuXtNjgEG8XjrgNIDk9DG1em4YkG1GPk/tVSgtelgVo+Kl0oycf7XQRmodXawxKg5oI5sGLacKsF9oLYmAWd/ZREQE/WsxCaMzdmKvc/8eJIEa1zt8sXFxTQJm7lUVq9pO9WqII+YNoq26vGzZNGxmZBHhVAuJ81sScx3fhjPFvohqUEPUa8jaCtTr/iiI2UYvhtdlFQAGFbkPEWlu/G5JCe8m/Ks1deBXR+Sv9nMowP26UlSsjgX5f42B4Qghu7XrXp7sMaDUI6huxxRH/rV1txolhfUXzItTSgNqoH+t07huF03muQOWkVDiohswKY0W/Ssluqsp3PPnY2K3AQ7ZM2mBMRa5xyf5ctF6MJpxjVgLUaJrNVqXL9OuBL1hx3ThpAs1BcJClwzvQkI8TnEMTrONP9VlyigKaCDPn5G0IrA6PxyweM0VZY33iPdQD8BSDs3EXm29QJHU+dsYfR+MySZlB51LhxhHZEnouK8CbKNz96Ix+X+D0hhOTAiR3AF9d8ruZsG12CmtlsDz8EpECu4Zvz4RYAcPa5jREnj/H7w==\",\"h\":\"0e8a80f9d5af8b2985e791d5ceb26f54\",\"k\":\"b8Av8LzvkKj2+JzDkE5SHK2trBRKcvjxqJ64wY71rdpkNpzLm44dAz5DdWCn6UvnfH2rdHHZcm2KaJyiXrfNjClHUaNaw3ZmuMxEkx+F9fy88QqJ8DxnjMLIvd4Ps3O9ZEkYu7iumap8DKmQb+iQ+ns3ztT7q3yuamMUEEiMDpY=\",\"p\":\"101\",\"t\":\"0\"}"
+    },
+    {
+      "name": "quoted-and-empty-headers",
+      "headerOrder": [
+        "appVersion",
+        "deviceName",
+        "timeStamp",
+        "nonce",
+        "uid",
+        "token",
+        "tokenSign"
+      ],
+      "headers": {
+        "appVersion": "7.3.92",
+        "deviceName": "A\"B\\C",
+        "timeStamp": "1700000000000",
+        "nonce": "00000000-0000-4000-8000-000000000003",
+        "uid": "",
+        "token": "",
+        "tokenSign": "a95c661a3377667e8c267d1cf8ef3087"
+      },
+      "headersJson": "{\"appVersion\":\"7.3.92\",\"deviceName\":\"A\\\"B\\\\C\",\"timeStamp\":\"1700000000000\",\"nonce\":\"00000000-0000-4000-8000-000000000003\",\"uid\":\"\",\"token\":\"\",\"tokenSign\":\"a95c661a3377667e8c267d1cf8ef3087\"}",
+      "aesKeyHex": "7a397938783777367635753474337332",
+      "kdfSaltHex": "303132333435363738396162636465666768696a6b6c6d6e6f707172737475764142434445464748",
+      "rsaPublicKey": "MIGJAoGBALmmqVPOwY1mTVHGEfg7jHck1MNXsVtUfrqY99bm/W2cjLi3LvG/wMYwbhmf9O+y3CUlZ5g4AMd2Ly4XbWUloG/O8+1USGJ8ddmrzbl8j2EZi0OhpVCYI381+zZ0qa3z1cOuG2XdJnE7pO6Y4JNC37miqMXYmjejVi2QDIbONomfAgMBAAE=",
+      "headerSign": "{\"d\":\"fqKc6+bmhRekAKxZ7kKxAXW8imLhcB2jjOzfN6Sgg4dU6p4sMAHj4QlRU0TDehisoG16acuIO0xNJzSuqpTxJmOrvi0yyu8y44CBGVh/aCBHpkj14KIRkGzF1Hj1ZYqA32l3WCRDIdlUl43oHzLR5Z9jb/5BI9WdbwLCBi1KdbqMTkMa+Lo9QAKpCp4HCn/raxnlfF3fe/NssKkBdvBDPZAVY5i5g67pI9YyCkADScgcvh5GRnB1pbRYC/u31DKU+uq98J17P0/sloHyoie2yy2/r2oCPYI6D2MooCKTW0RZRAsfttwBGsisyfQKv2VR5ZAhPMyYZ5z9k4Sxfj86oh82knE4vav1w9X5Sga/x0mK2tbSQb/G3xJRpYYY35ycQ90L5cF5IvE73Dj3PMYmHHG6JUbUBHZ7olBw4nTLG6qs6lGpf5c332hEQcpfbv8SDoLyGZbVdteynBK7OfUVkA1mRzP1VngX5AKmSSrRTKVfPdFgWms4XH5iraFvWtkzYX2IEDMyFammoBdoCTkpLW9E7jc8wF1fMRbp/AtRYl8=\",\"h\":\"bd599ab0bf1dcdc40b443794f2e632e9\",\"k\":\"sEoC19H8TrOmub+aYh8Fb+8l90eM/rAU5ZaU6JN8S39ncLpFQfv0Wsox5fibmBmDf1jXdCECbheQxR6s/0OTwATwGNW++rPUAWpI+q/yiyFBuqMh/b16WXNmOco8JU2u7FnH94nYjP0MbKbPQwFrcILKX5f2DFd4tFJZ2H2bEmo=\",\"p\":\"101\",\"t\":\"0\"}"
+    }
+  ],
+  "token": [
+    {
+      "name": "ascii-token",
+      "token": "tok-0123456789",
+      "salt": "2slhe02lsfiwowlcixisla_sls-_slaor",
+      "sign": "67e299b4d1102c58c5890f5d5214ffd2"
+    },
+    {
+      "name": "empty-token",
+      "token": "",
+      "salt": "2slhe02lsfiwowlcixisla_sls-_slaor",
+      "sign": "f76bebeb4a9c448001f1a9a57bb438ae"
+    },
+    {
+      "name": "separator-chars-in-token",
+      "token": "tok&en=1?x",
+      "salt": "2slhe02lsfiwowlcixisla_sls-_slaor",
+      "sign": "2b09cb17a84a40cd8e4b5ab949c568b2"
+    },
+    {
+      "name": "utf8-token-custom-salt",
+      "token": "令牌-测试",
+      "salt": "custom-salt-测试",
+      "sign": "ad710b659f086c4042658820ebd8b5df"
+    }
+  ]
+}
