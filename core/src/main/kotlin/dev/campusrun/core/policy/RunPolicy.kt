@@ -46,4 +46,11 @@ data class RunPolicy(
     val maxDistancePerRunM: Int,
     val dailyRunLimit: Int,
     val faceWindow: ClosedRange<Long>?,
+    /**
+     * `runRuleModel.minDistance` — the per-run distance floor (Task 9 gate input; plan
+     * amendment recorded in the Task 9 dispatch). 0 means "not advertised" (empty rule),
+     * which [dev.campusrun.core.policy.RunPolicyValidator] treats as the settlement
+     * completeness floor instead (upstream builder `selDistance = 2000`).
+     */
+    val minDistancePerRunM: Int = 0,
 )

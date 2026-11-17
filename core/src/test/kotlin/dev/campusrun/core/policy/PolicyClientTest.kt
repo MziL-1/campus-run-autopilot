@@ -2,6 +2,7 @@ package dev.campusrun.core.policy
 
 import dev.campusrun.core.api.ApiClient
 import dev.campusrun.core.config.ProtocolParams
+import dev.campusrun.core.crypto.NetSecKit
 import dev.campusrun.core.session.Token
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -14,11 +15,13 @@ import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
+import okio.Buffer
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import java.util.Base64
 
 /**
  * Offline tests over the live 7.4.x fixtures captured by Task 2 and the production
@@ -49,6 +52,8 @@ class PolicyClientTest {
         assertEquals(22, policy.validToHour)
         // runRuleModel.dayGoal = 2000.0 (the only distance ceiling the 7.4.x rule body has).
         assertEquals(2000, policy.maxDistancePerRunM)
+        // runRuleModel.minDistance = 2000.0 — the per-run floor (Task 9 gate input).
+        assertEquals(2000, policy.minDistancePerRunM)
         // No daily-count field in the 7.4.x rule body; weekCountGoal (0) is weekly, not daily.
         assertEquals(0, policy.dailyRunLimit)
         // runFaceCheckConfigDTO = null and the 7.4.x DTO carries no epoch window fields.
@@ -192,6 +197,7 @@ class PolicyClientTest {
         assertEquals(6, policy.validFromHour)
         assertEquals(20, policy.validToHour)
         assertEquals(3000, policy.maxDistancePerRunM) // dayGoal, not minDistance
+        assertEquals(1500, policy.minDistancePerRunM) // minDistance is the per-run floor
         assertEquals(0, policy.dailyRunLimit) // weekCountGoal is weekly; no daily field exists
 
         assertEquals(4, policy.fence.size)
@@ -207,21 +213,33 @@ class PolicyClientTest {
     }
 
     @Test
-    fun `fetch posts policy then fence with session credentials`() {
+    fun `fetch posts policy then fence then five-point with session credentials`() {
         val paths = mutableListOf<String>()
+        val requestBodies = mutableMapOf<String, String>()
         val api = apiServing(
             mapOf(
                 // Production depth: ApiClient.decode returns the envelope, so fetch must
                 // unwrap `{error, message, data}` before parsing (upstream get_run_policy).
                 "/api/v70103/runModePolicy" to policyEnvelope(fixtureText("run_mode_policy.json")),
                 "/api/v1/getGeoFenceForRun" to fixtureText("geo_fence.json"),
+                // minDistance = 2000 -> fetch issues the five-point query (Task 9 ruling:
+                // the production school has no fence passPoints, so checkpoints can only
+                // come from /api/v560/get/1/distance/{d}).
+                "/api/v560/get/1/distance/2000" to fivePointResponse(
+                    """[{"lat":30.0010,"lon":120.0010,"isFixed":1,"pointName":"A"},""" +
+                        """{"lat":30.0020,"lon":120.0020,"isFixed":0,"pointName":"B"}]""",
+                ),
             ),
             paths,
+            requestBodies,
         )
 
         val policy = PolicyClient(api).fetch(Token("session-value", "uid-42", "35102", null), mode = 1)
 
-        assertEquals(listOf("/api/v70103/runModePolicy", "/api/v1/getGeoFenceForRun"), paths)
+        assertEquals(
+            listOf("/api/v70103/runModePolicy", "/api/v1/getGeoFenceForRun", "/api/v560/get/1/distance/2000"),
+            paths,
+        )
         assertEquals("uid-42", api.uid)
         assertEquals("session-value", api.token)
         assertEquals(180, policy.paceMinSecPerKm)
@@ -229,7 +247,75 @@ class PolicyClientTest {
         assertEquals(10, policy.validFromHour)
         assertEquals(22, policy.validToHour)
         assertEquals(2000, policy.maxDistancePerRunM)
+        assertEquals(2000, policy.minDistancePerRunM)
         assertNull(policy.faceWindow)
+        // Five-point merge: isFixed=1 -> required, isFixed=0 -> optional (upstream builder).
+        assertEquals(listOf(LatLng(30.0010, 120.0010)), policy.requiredPoints)
+        assertEquals(listOf(LatLng(30.0020, 120.0020)), policy.optionalPoints)
+
+        // The request itself, decrypted through the Task 3 envelope: no fence -> null-island
+        // anchor (documented no-fence path), upstream body fields, and the sign pinned to
+        // md5("http://run.gxapp.iydsj.com/api/v560/get/1/distance/2000" + salt) — the same
+        // literal upstream's test_checkpoints.py asserts.
+        val checkpoint = decryptPostBody(
+            requestBodies.getValue("/api/v560/get/1/distance/2000"),
+            protocolParams(),
+        )
+        assertEquals(0.0, checkpoint.getValue("latitude").jsonPrimitive.content.toDouble())
+        assertEquals(0.0, checkpoint.getValue("longitude").jsonPrimitive.content.toDouble())
+        assertEquals(35102, checkpoint.getValue("selectedUnid").jsonPrimitive.content.toInt())
+        assertEquals(-1, checkpoint.getValue("runAreaId").jsonPrimitive.content.toInt())
+        assertEquals("", checkpoint.getValue("runec").jsonPrimitive.content)
+        assertEquals(36, checkpoint.getValue("uuid").jsonPrimitive.content.length)
+        assertEquals(
+            "45732c140c185c94e096316a297a6065",
+            checkpoint.getValue("sign").jsonPrimitive.content,
+        )
+    }
+
+    @Test
+    fun `fetch five-point business error leaves checkpoints empty but still called`() {
+        val paths = mutableListOf<String>()
+        val api = apiServing(
+            mapOf(
+                "/api/v70103/runModePolicy" to policyEnvelope(fixtureText("run_mode_policy.json")),
+                "/api/v1/getGeoFenceForRun" to fixtureText("geo_fence.json"),
+                "/api/v560/get/1/distance/2000" to """{"error":-10000,"message":"ERROR","data":null}""",
+            ),
+            paths,
+        )
+
+        val policy = PolicyClient(api).fetch(Token("session-value", "uid-42", "35102", null), mode = 1)
+
+        assertTrue(paths.contains("/api/v560/get/1/distance/2000"), "five-point must be attempted: $paths")
+        assertTrue(policy.requiredPoints.isEmpty())
+        assertTrue(policy.optionalPoints.isEmpty())
+    }
+
+    @Test
+    fun `fetch skips five-point when the fence already carries passPoints`() {
+        val paths = mutableListOf<String>()
+        val fenceWithPassPoints = Json.parseToJsonElement(
+            """{"error":10000,"message":"成功","data":{"geoFences":[{
+              "id":1,"name":"s",
+              "points":[{"lat":30.0,"lng":120.0},{"lat":30.0,"lng":120.01},{"lat":30.01,"lng":120.01}],
+              "passPoints":[{"lat":30.005,"lon":120.005,"isFixed":1}]
+            }]}}""",
+        )
+        val api = apiServing(
+            mapOf(
+                "/api/v70103/runModePolicy" to policyEnvelope(fixtureText("run_mode_policy.json")),
+                "/api/v1/getGeoFenceForRun" to fenceWithPassPoints.toString(),
+                "/api/v560/get/1/distance/2000" to fivePointResponse("""[{"lat":0.0,"lon":0.0}]"""),
+            ),
+            paths,
+        )
+
+        val policy = PolicyClient(api).fetch(Token("session-value", "uid-42", "35102", null), mode = 1)
+
+        // Upstream execute_full_run only queries checkpoints when the fence has none.
+        assertEquals(listOf("/api/v70103/runModePolicy", "/api/v1/getGeoFenceForRun"), paths)
+        assertEquals(listOf(LatLng(30.005, 120.005)), policy.requiredPoints)
     }
 
     @Test
@@ -302,6 +388,10 @@ class PolicyClientTest {
     private fun policyEnvelope(ruleBody: String): String =
         """{"error":10000,"message":"成功","data":$ruleBody}"""
 
+    /** Production five-point depth: `{error, message, data:{pointsResModels:[...]}}`. */
+    private fun fivePointResponse(pointsJson: String): String =
+        """{"error":10000,"message":"成功","data":{"pointsResModels":$pointsJson,"sportStartTime":1794816000000}}"""
+
     private fun fenceWithPoints(pointsJson: String): JsonElement = Json.parseToJsonElement(
         """{"error":10000,"message":"成功","data":{"geoFences":[{"id":1,"name":"s","points":$pointsJson}]}}""",
     )
@@ -313,11 +403,21 @@ class PolicyClientTest {
             "missing policy/$name fixture"
         }.use { it.readBytes().toString(Charsets.UTF_8) }
 
-    private fun apiServing(bodies: Map<String, String>, paths: MutableList<String>): ApiClient {
+    private fun apiServing(
+        bodies: Map<String, String>,
+        paths: MutableList<String>,
+        requestBodies: MutableMap<String, String>? = null,
+    ): ApiClient {
         val client = OkHttpClient.Builder()
             .addInterceptor { chain ->
-                val path = chain.request().url.encodedPath
+                val request = chain.request()
+                val path = request.url.encodedPath
                 paths += path
+                if (requestBodies != null && request.body != null) {
+                    val buffer = Buffer()
+                    request.body!!.writeTo(buffer)
+                    requestBodies[path] = buffer.readUtf8()
+                }
                 Response.Builder()
                     .request(chain.request())
                     .protocol(Protocol.HTTP_1_1)
@@ -328,6 +428,17 @@ class PolicyClientTest {
             }
             .build()
         return ApiClient(params = protocolParams(), client = client)
+    }
+
+    /** Reassemble `k || d` (Task 3 envelope) and return the decrypted POST body object. */
+    private fun decryptPostBody(wireText: String, params: ProtocolParams): JsonObject {
+        val wire = Json.parseToJsonElement(wireText).jsonObject
+        val envelope = Base64.getDecoder().decode(wire.getValue("k").jsonPrimitive.content) +
+            Base64.getDecoder().decode(wire.getValue("d").jsonPrimitive.content)
+        val inner = Json.parseToJsonElement(NetSecKit.decrypt(envelope, params).decodeToString()).jsonObject
+        return Json.parseToJsonElement(
+            String(Base64.getDecoder().decode(inner.getValue("data").jsonPrimitive.content), Charsets.UTF_8),
+        ).jsonObject
     }
 
     /** Reuses the Task 5 gmt fixtures for a valid NetSecKit parameter set (no network). */
