@@ -36,10 +36,14 @@ import java.util.Locale
  *
  * `encrypt_request` draws the request AES key, the `keyData*` segments and `time.time()`
  * from randomness/the clock. The first two are pinned by [ProtocolParams] (aesKey, kdfSalt),
- * and the inner second-granularity timestamp is taken from `headers["timeStamp"]` (the
+ * and the inner second-granularity timestamp is derived from `headers["timeStamp"]` (the
  * upstream millisecond header) so the digest stays reproducible across languages — the
- * same forced-determinism deviation Task 3 documented for the PKCS#1 padding. When the
- * header is absent the system clock is used, which is upstream's behaviour.
+ * same forced-determinism deviation Task 3 documented for the PKCS#1 padding.
+ *
+ * `headers["timeStamp"]` is **required**: upstream `build_headers` always inserts
+ * `timeStamp = str(now_ms)` before `encrypt_request` reads `int(time.time())`. Passing a
+ * header set without it, or a seconds-shaped value, is a caller bug and fails loudly here
+ * instead of producing a self-consistent digest that disagrees with the wire header.
  *
  * ### tokenSign
  *
@@ -69,6 +73,7 @@ object Signer {
         require(params.kdfSalt.size == 4 * KEY_DATA_SEGMENT_BYTES) {
             "kdfSalt must hold the four 10-byte keyData segments (40 bytes), got ${params.kdfSalt.size}"
         }
+        val timestampSeconds = innerTimestampSeconds(headers)
         val headersJson = compactJson(headers)
         val data = Base64.getEncoder().encodeToString(headersJson.toByteArray(Charsets.UTF_8))
         // Upstream inner_dict order is keyDataFour, One, Three, Two (core/crypto.py).
@@ -79,7 +84,7 @@ object Signer {
             append(",\"keyDataThree\":").append(jsonString(keyData(params, 3)))
             append(",\"keyDataTwo\":").append(jsonString(keyData(params, 2)))
             append(",\"platform\":2")
-            append(",\"timeStamp\":").append(innerTimestampSeconds(headers))
+            append(",\"timeStamp\":").append(timestampSeconds)
             append("}\n")
         }
         val innerBytes = inner.toByteArray(Charsets.UTF_8)
@@ -123,10 +128,21 @@ object Signer {
         return md5Hex((canonical + salt).toByteArray(Charsets.UTF_8))
     }
 
-    /** `int(time.time())`, pinned from the upstream millisecond `timeStamp` header when present. */
+    /**
+     * Upstream's inner `int(time.time())`, derived from the mandatory millisecond
+     * `timeStamp` header. A missing, non-integer or seconds-shaped value is a caller bug
+     * (upstream always inserts the ms header before encrypting), so it fails loudly rather
+     * than being guessed or silently "repaired".
+     */
     private fun innerTimestampSeconds(headers: Map<String, String>): Long {
-        val raw = headers["timeStamp"]?.toLongOrNull() ?: return System.currentTimeMillis() / 1000
-        return if (raw >= EPOCH_MILLIS_THRESHOLD) raw / 1000 else raw
+        val raw = headers["timeStamp"]
+            ?: throw IllegalArgumentException("headerSign requires the millisecond timeStamp header")
+        val millis = raw.toLongOrNull()
+            ?: throw IllegalArgumentException("timeStamp header must be integer epoch milliseconds: $raw")
+        require(millis >= EPOCH_MILLIS_THRESHOLD) {
+            "timeStamp header must be epoch milliseconds, got $raw"
+        }
+        return millis / 1000
     }
 
     /** Upstream `keyDataOne..Four`: `kdfSalt[10*(n-1):10*n]`, upstream UUID alphabet (ASCII). */

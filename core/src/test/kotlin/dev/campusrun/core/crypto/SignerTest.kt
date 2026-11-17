@@ -7,6 +7,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
@@ -42,6 +43,18 @@ class SignerTest {
         cases.forEach { c ->
             val p = params(c.aesKey, c.kdfSalt, c.rsaPublicKey)
             assertEquals(c.expected, Signer.headerSign(c.headers, p), "headerSign ${c.name}")
+        }
+    }
+
+    @Test
+    fun `headerSign requires millisecond timeStamp`() {
+        val withoutTimestamp = linkedMapOf("uid" to "90001", "token" to "tok")
+        assertThrows(IllegalArgumentException::class.java) {
+            Signer.headerSign(withoutTimestamp, params())
+        }
+        val secondsShape = linkedMapOf("timeStamp" to "1750123456")
+        assertThrows(IllegalArgumentException::class.java) {
+            Signer.headerSign(secondsShape, params())
         }
     }
 
