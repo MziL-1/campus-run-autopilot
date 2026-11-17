@@ -5,6 +5,7 @@ import dev.campusrun.core.config.ProtocolParams
 import dev.campusrun.core.crypto.NetSecKit
 import dev.campusrun.core.crypto.Signer
 import dev.campusrun.core.identity.DeviceIdentity
+import dev.campusrun.core.policy.LatLng
 import dev.campusrun.core.policy.PolicyClient
 import dev.campusrun.core.policy.RunPolicy
 import dev.campusrun.core.policy.RunPolicyValidator
@@ -84,7 +85,9 @@ internal fun sessionFromEnv(): Token? {
  */
 internal fun productionParams(): ProtocolParams = ProtocolParams(
     aesKey = "0123456789abcdef".toByteArray(Charsets.US_ASCII),
-    kdfSalt = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGH".toByteArray(Charsets.US_ASCII),
+    // Exactly four 10-byte keyData segments (Signer/NetSecKit require 40 bytes; a live
+    // probe caught a 44-byte literal here before any request left the device).
+    kdfSalt = "abcdefghijklmnopqrstuvwxyz0123456789ABCD".toByteArray(Charsets.US_ASCII),
     rsaPublicKey = RSA_PUBLIC_KEY_B64,
     endpointBase = "https://run.gxapp.iydsj.com",
     signSalt = "2slhe02lsfiwowlcixisla_sls-_slaor",
@@ -198,20 +201,48 @@ internal fun executeRun(
         throw StageFailure("policy", "checkpoint $stray lies outside the China bounding box — refusing to synthesize")
     }
 
+    // No server-side polygon (geoFences = null, the live school): derive synthesis
+    // geometry from the issued checkpoints. The REAL policy still drives validation
+    // (empty fence -> no 出围栏 rule) and settlement — nothing fence-derived is submitted.
+    val checkpoints = policy.requiredPoints + policy.optionalPoints
+    val geometryFence = when {
+        policy.fence.size >= 3 -> policy.fence
+        checkpoints.isNotEmpty() -> deriveFence(checkpoints)
+        else -> policy.fence
+    }
+    if (geometryFence !== policy.fence) {
+        log(
+            "synth: derived ${geometryFence.size}-point fence around ${checkpoints.size} checkpoints " +
+                "(school advertises no geoFences)",
+        )
+    }
+    if (checkpoints.isNotEmpty() && checkpoints.size <= 8) {
+        log("checkpoints: " + checkpoints.joinToString { "${it.lat},${it.lng}" })
+    }
+
     // dayGoal is a *daily* total (upstream's own default run is 2100 m against a
     // dayGoal-2000 school, and its builder never enforces it per run), so a per-run
     // target above it lifts the synthesis cap; the validator's per-run floor still
     // gates the submission below.
-    val synthPolicy = if (policy.maxDistancePerRunM in 1 until distanceM) {
-        policy.copy(maxDistancePerRunM = 0)
+    val synthBase = if (policy.maxDistancePerRunM in 1 until distanceM) {
+        policy.copy(fence = geometryFence, maxDistancePerRunM = 0)
     } else {
-        policy
+        policy.copy(fence = geometryFence)
     }
 
+    // Route through ALL issued checkpoints when the geometry can host it — upstream's
+    // builder uses every checkpoint as a waypoint and its consistency check demands the
+    // track touch each one — falling back to required-only when the pinned tour alone
+    // would overrun the target (passing the isFixed=1 points is the hard requirement).
     val track = try {
-        TrackSynthesizer.synthesize(synthPolicy, distanceM, durationSec, seed) // stage: synth
-    } catch (e: IllegalArgumentException) {
-        throw StageFailure("synth", e.message ?: "fence/checkpoint geometry cannot host the run")
+        TrackSynthesizer.synthesize(synthBase.copy(requiredPoints = checkpoints), distanceM, durationSec, seed)
+    } catch (allPoints: IllegalArgumentException) {
+        log("synth: all-checkpoint routing unavailable (${allPoints.message}); falling back to required-only")
+        try {
+            TrackSynthesizer.synthesize(synthBase, distanceM, durationSec, seed)
+        } catch (requiredOnly: IllegalArgumentException) {
+            throw StageFailure("synth", requiredOnly.message ?: "fence/checkpoint geometry cannot host the run")
+        }
     }
     log("synth: seed $seed, ${track.size} samples at 1 Hz")
 
@@ -256,6 +287,33 @@ private fun settleRrid(response: JsonElement): String? {
         ?: (data["id"] as? JsonPrimitive)?.contentOrNull?.takeIf { it != "null" }
     return rrid
 }
+
+/**
+ * Bounding-box polygon (+padding) around the issued checkpoints, for schools that
+ * advertise no `geoFences` polygon but do issue checkpoints (the live school):
+ * [TrackSynthesizer] needs a polygon to inscribe the loop in. Synthesis geometry only —
+ * validation runs against the real policy and settlement never sees this fence.
+ */
+private fun deriveFence(checkpoints: List<LatLng>): List<LatLng> {
+    val latMin = checkpoints.minOf { it.lat }
+    val latMax = checkpoints.maxOf { it.lat }
+    val lngMin = checkpoints.minOf { it.lng }
+    val lngMax = checkpoints.maxOf { it.lng }
+    val latHalf = maxOf((latMax - latMin) / 2 + FENCE_PAD_DEG, FENCE_MIN_HALF_DEG)
+    val lngHalf = maxOf((lngMax - lngMin) / 2 + FENCE_PAD_DEG, FENCE_MIN_HALF_DEG)
+    val latCentre = (latMin + latMax) / 2
+    val lngCentre = (lngMin + lngMax) / 2
+    return listOf(
+        LatLng(latCentre - latHalf, lngCentre - lngHalf),
+        LatLng(latCentre + latHalf, lngCentre - lngHalf),
+        LatLng(latCentre + latHalf, lngCentre + lngHalf),
+        LatLng(latCentre - latHalf, lngCentre + lngHalf),
+    )
+}
+
+/** ~110 m of padding in degrees; the floor keeps a degenerate (single-point) box usable. */
+private const val FENCE_PAD_DEG = 0.001
+private const val FENCE_MIN_HALF_DEG = 0.0015
 
 // ---------------------------------------------------------------- subcommands
 
