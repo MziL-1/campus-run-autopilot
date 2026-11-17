@@ -23,7 +23,7 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('all', 'sync-time', 'endpoints', 'login', 'profile', 'rules', 'history', 'fixture')]
+    [ValidateSet('all', 'sync-time', 'endpoints', 'login', 'profile', 'rules', 'history', 'inspect', 'fixture')]
     [string]$Stage = 'all'
 )
 
@@ -268,7 +268,75 @@ for pass_name, client in PASSES:
               % (pass_name, name, code, json.dumps(message, ensure_ascii=False)))
 '@
 
+$shapeSource = @'
+# -*- coding: utf-8 -*-
+"""Structural sketch of the decrypted responses that the CLI summary hides.
+
+Prints key names, value types and container lengths only - never the values -
+so a 7.4.x response-shape change can be told apart from "the server simply has
+no data". Written by tools/probe.ps1.
+"""
+import datetime
+import json
+import os
+import sys
+
+sys.path.insert(0, os.environ["PROBE_SUITE"])
+
+import history.config as history_config
+import policy.config as policy_config
+import profile.config as profile_config
+from core.client import BaseNetSecClient
+from core.config import HOST_DISCOVERY
+
+client = BaseNetSecClient(
+    uid=os.environ.get("CAMPUS_UID"),
+    token=os.environ.get("CAMPUS_TOKEN"),
+    unid=os.environ.get("CAMPUS_UNID"),
+)
+
+now = datetime.datetime.now()
+CASES = [
+    ("profile.user_info", "GET", profile_config.URL_USER_INFO, None),
+    ("profile.home_page_base_user_info", "GET",
+     profile_config.URL_HOME_BASE_USER + "?uid=" + str(os.environ.get("CAMPUS_UID")), None),
+    ("policy.personal_semester_info", "POST", policy_config.URL_SEMESTER_INFO, {"runMode": 1}),
+    ("history.runnings_records", "POST", history_config.URL_RUN_RECORDS,
+     {"pageNum": 1, "pageSize": 5, "sid": 0, "type": 1}),
+    ("history.calendar_list", "POST", HOST_DISCOVERY + "/api/v70100/run/calendar/list",
+     {"year": now.year, "month": now.month}),
+]
+
+
+def sketch(value, depth=0):
+    if isinstance(value, dict):
+        if depth >= 3:
+            return "object(%d keys)" % len(value)
+        return dict((key, sketch(val, depth + 1)) for key, val in value.items())
+    if isinstance(value, list):
+        if not value:
+            return "list[0]"
+        return "list[%d] of %s" % (len(value), sketch(value[0], depth + 1))
+    if isinstance(value, str):
+        return "str(len=%d)" % len(value)
+    return type(value).__name__
+
+
+for name, method, url, body in CASES:
+    answer = client.execute_request(method, url, body_plain=body)
+    if isinstance(answer, dict):
+        prefix = "code=%s message=%s" % (
+            answer.get("error"), json.dumps(answer.get("message"), ensure_ascii=False))
+    else:
+        prefix = "non-dict"
+    print("SHAPE %s %s %s" % (name, prefix, json.dumps(sketch(answer), ensure_ascii=False)))
+'@
+
 New-Item -ItemType Directory -Force -Path $ObsDir | Out-Null
+[System.IO.File]::WriteAllText(
+    (Join-Path $ObsDir 'probe_shapes.py'),
+    $shapeSource,
+    (New-Object System.Text.UTF8Encoding($false)))
 [System.IO.File]::WriteAllText(
     (Join-Path $ObsDir 'probe_endpoints.py'),
     $endpointSource,
@@ -397,6 +465,12 @@ function Get-TokenContext {
     if ($login.Raw -match 'token=(\S+)') { $context.Token = $matches[1] }
     if ($login.Raw -match '\buid=(\d+)') { $context.Uid = $matches[1] }
     if ($login.Raw -match '\bunid=(\d+)') { $context.Unid = $matches[1] }
+
+    # A freshly minted session credential is a secret from this point on: without
+    # this the recorded command line of every later stage would carry it verbatim.
+    if ($context.Token -and ($script:Secrets -notcontains $context.Token)) {
+        $script:Secrets += $context.Token
+    }
     return $context
 }
 
@@ -413,6 +487,22 @@ function Invoke-ContextStage {
     return Invoke-Stage -Name $Name -Script $Script -CliArgs $arguments -SuccessPattern $SuccessPattern
 }
 
+function Test-FixtureUsable {
+    <# A live capture is only a fixture if it actually carries the payload.
+    runModePolicy returns an empty document outside the school's valid run
+    window, which must never overwrite a good fixture with {}. #>
+    param([string]$Name, [string]$Path)
+
+    try { $parsed = Get-Content $Path -Raw -Encoding UTF8 | ConvertFrom-Json }
+    catch { return $false }
+
+    switch ($Name) {
+        'run_mode_policy.json' { return [bool]($parsed.PSObject.Properties.Name -contains 'runRuleModel') -and [bool]$parsed.runRuleModel }
+        'geo_fence.json'       { return [bool]($parsed.error -eq 10000) }
+        default                { return $true }
+    }
+}
+
 function Export-Fixture {
     <# Decrypted policy responses -> fixture dir, redacted and provenance-noted. #>
     param([pscustomobject]$Context)
@@ -422,7 +512,7 @@ function Export-Fixture {
     Remove-Item (Join-Path $FixtureRaw '*.json') -Force -ErrorAction SilentlyContinue
 
     if (-not $Context -or -not $Context.Token -or -not $Context.Uid) {
-        Write-Warning 'fixture 无法抓取 (无有效会话), 写入占位文件'
+        Write-Warning 'fixture 无法抓取 (无有效会话), 保留已有文件'
         Write-FixturePlaceholder
         return
     }
@@ -436,25 +526,37 @@ function Export-Fixture {
         }
 
     if ($dump.Verdict -ne 'pass') {
-        Write-Warning 'fixture 抓取失败, 保留占位文件'
+        Write-Warning 'fixture 抓取失败, 保留已有文件'
         Write-FixturePlaceholder
         return
     }
     foreach ($name in @('run_mode_policy.json', 'geo_fence.json')) {
         $source = Join-Path $FixtureRaw $name
-        if (-not (Test-Path $source)) { continue }
+        $target = Join-Path $FixtureDir $name
+        if (-not (Test-Path $source)) {
+            Write-Warning "[fixture] $name 未产出, 保留已有文件"
+            continue
+        }
+        if (Test-Path $target) {
+            $existingOk = Test-FixtureUsable -Name $name -Path $target
+            $freshOk = Test-FixtureUsable -Name $name -Path $source
+            if ($existingOk -and -not $freshOk) {
+                Write-Warning "[fixture] $name 本次响应为空 (退出运行时段?), 保留已有真实样本"
+                continue
+            }
+        }
         $text = Protect-Output (Get-Content $source -Raw -Encoding UTF8)
-        [System.IO.File]::WriteAllText(
-            (Join-Path $FixtureDir $name),
-            $text,
-            (New-Object System.Text.UTF8Encoding($false)))
+        [System.IO.File]::WriteAllText($target, $text, (New-Object System.Text.UTF8Encoding($false)))
         Write-Host "[fixture] $name -> $FixtureDir"
     }
 }
 
 function Write-FixturePlaceholder {
-    <# Keeps the fixture directory committed before a live capture exists. #>
+    <# Keeps the fixture directory committed before a live capture exists.
+    Never replaces an already-usable capture with a placeholder. #>
     foreach ($name in @('run_mode_policy.json', 'geo_fence.json')) {
+        $target = Join-Path $FixtureDir $name
+        if ((Test-Path $target) -and (Test-FixtureUsable -Name $name -Path $target)) { continue }
         $placeholder = [ordered]@{
             _placeholder = $true
             _reason      = 'live capture unavailable, see docs/protocol-7.4-findings.md'
@@ -501,6 +603,15 @@ switch ($Stage) {
         Invoke-ContextStage -Name 'history' -Script 'history/cli.py' -CliArgs @() `
             -SuccessPattern '历史记录: 页码=' -Context $context | Out-Null
     }
+    'inspect' {
+        $context = Get-TokenContext
+        Invoke-Stage -Name 'inspect' -Script (Join-Path $ObsDir 'probe_shapes.py') `
+            -SuccessPattern 'SHAPE ' -ExtraEnv @{
+                CAMPUS_TOKEN = $context.Token
+                CAMPUS_UID   = $context.Uid
+                CAMPUS_UNID  = $context.Unid
+            } | Out-Null
+    }
     'fixture' {
         try { $context = Get-TokenContext }
         catch { Write-Warning $_.Exception.Message; $context = $null }
@@ -525,6 +636,12 @@ switch ($Stage) {
             -SuccessPattern '跑步规则: 模式=' -Context $context | Out-Null
         Invoke-ContextStage -Name 'history' -Script 'history/cli.py' -CliArgs @() `
             -SuccessPattern '历史记录: 页码=' -Context $context | Out-Null
+        Invoke-Stage -Name 'inspect' -Script (Join-Path $ObsDir 'probe_shapes.py') `
+            -SuccessPattern 'SHAPE ' -ExtraEnv @{
+                CAMPUS_TOKEN = $context.Token
+                CAMPUS_UID   = $context.Uid
+                CAMPUS_UNID  = $context.Unid
+            } | Out-Null
         Export-Fixture -Context $context
     }
 }

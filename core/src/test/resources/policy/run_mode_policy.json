@@ -1,6 +1,43 @@
 {
-    "_placeholder":  true,
-    "_reason":  "live capture unavailable, see docs/protocol-7.4-findings.md",
-    "_capturedAt":  "2026-11-16T15:27:51.7418119+08:00",
-    "_source":  "tools/probe.ps1 -Stage fixture"
+  "policy": 1,
+  "timestamp": 1794816298979,
+  "runRuleModel": {
+    "updateTime": 0,
+    "dayGoal": 2000.0,
+    "weekCountGoal": 0,
+    "bluetoothVerify": false,
+    "faceVerify": false,
+    "minDistance": 2000,
+    "minRunTime": 0,
+    "speedTop": 3.0,
+    "speedBottom": 10.0,
+    "stepTop": 300,
+    "stepBottom": 40,
+    "timeInterval": 10,
+    "validTime": [
+      {
+        "start": "10:00:00",
+        "end": "22:00:00"
+      }
+    ],
+    "endRunCalculate": false,
+    "runValidWeek": null,
+    "sequenceStrength": 0,
+    "runningPauseTime": 1800,
+    "unqualifiedRate": 15,
+    "intervalStepModel": 0,
+    "endRunCalculateSingle": false,
+    "freedomRunCalculateSingle": false,
+    "speedStandard": 900,
+    "sequenceRule": 0,
+    "freedomElectronicFence": 0
+  },
+  "geoFence": {
+    "updateTime": 1561910400000,
+    "geoFences": []
+  },
+  "message": null,
+  "runAreaModels": null,
+  "freezeRunTime": 0,
+  "runFaceCheckConfigDTO": null
 }
