@@ -15,11 +15,13 @@ import kotlin.math.roundToInt
  * Fetch seam for [RunPolicy]: read the live rule (`runModePolicy`) and fence
  * (`getGeoFenceForRun`) with an authenticated [Token] and flatten them into a [RunPolicy].
  *
- * Parsing is pure and lives in [parseRunPolicy] so fixtures can be tested offline. The
- * empty rule body 7.4.x returns outside the valid window (findings §3.5) is a **valid
- * empty policy**, not an error; structurally wrong documents (non-object roots, a
- * `runRuleModel` or point that is not an object, non-numeric coordinates/speeds) throw
- * [IllegalArgumentException].
+ * Parsing is pure and lives in [parseRunPolicy] so fixtures can be tested offline. `fetch`
+ * first unwraps the live envelope exactly like upstream `get_run_policy`
+ * (`policy/client.py`): only `{error:10000, data:{...}}` carries a rule body, and a
+ * business-error envelope becomes an **empty policy**, not an error. The empty rule body
+ * 7.4.x returns outside the valid window (findings §3.5) is likewise a **valid empty
+ * policy**; structurally wrong documents (non-object roots, a `runRuleModel` or point that
+ * is not an object, non-numeric coordinates/speeds) throw [IllegalArgumentException].
  */
 class PolicyClient(val api: ApiClient) {
 
@@ -41,7 +43,7 @@ class PolicyClient(val api: ApiClient) {
             },
         )
         val fence = api.post(GEO_FENCE_PATH, buildJsonObject { put("geoFenceUpdateTime", 0) })
-        return parseRunPolicy(policy, fence)
+        return parseRunPolicy(unwrapPolicyEnvelope(policy), fence)
     }
 
     private companion object {
@@ -53,10 +55,32 @@ class PolicyClient(val api: ApiClient) {
 }
 
 /**
+ * Upstream `get_run_policy` success check, applied to the payload [ApiClient] returns:
+ * `error == 10000` and a non-null `data` is the rule body; anything else (business error,
+ * `error == 10000` without `data`) means "no rule" and yields an empty document. A payload
+ * without an `error` field is already the rule body (what the parser is given in tests).
+ */
+private fun unwrapPolicyEnvelope(payload: JsonElement): JsonElement {
+    val envelope = payload as? JsonObject
+        ?: throw IllegalArgumentException(
+            "runModePolicy response must be a JSON object, got ${payload::class.java.simpleName}",
+        )
+    val error = envelope.intField("error")
+    if (error == null) return payload
+    if (error != BUSINESS_SUCCESS) return EMPTY_POLICY
+    val data = envelope["data"] ?: return EMPTY_POLICY
+    if (data is JsonNull) return EMPTY_POLICY
+    return data
+}
+
+private val EMPTY_POLICY: JsonElement = JsonObject(emptyMap())
+
+/**
  * Pure parser for the two live business payloads:
  *
- * - [policy] is the decrypted `data` of `POST /api/v70103/runModePolicy` (Task 2 fixture
- *   `run_mode_policy.json`): `{policy, timestamp, runRuleModel, geoFence, ...}`.
+ * - [policy] is the rule body: the decrypted `data` of `POST /api/v70103/runModePolicy`
+ *   (Task 2 fixture `run_mode_policy.json` is exactly this level). A document that still
+ *   carries a non-10000 `error` is an empty rule, mirroring the fence envelope.
  * - [geoFence] is the whole decrypted `POST /api/v1/getGeoFenceForRun` response
  *   (`geo_fence.json`): `{error, message, data:{geoFences:[..]}}`.
  *
@@ -67,6 +91,18 @@ internal fun parseRunPolicy(policy: JsonElement, geoFence: JsonElement): RunPoli
     val geometry = parseFence(geoFence)
     val root = policy as? JsonObject
         ?: throw IllegalArgumentException("runModePolicy payload must be a JSON object, got ${policy::class.java.simpleName}")
+
+    val error = root.intField("error")
+    if (error != null && error != BUSINESS_SUCCESS) {
+        // Business-error envelope: upstream returns no rule at all (empty policy).
+        return geometry.toPolicy(
+            paceMinSecPerKm = 0,
+            paceMaxSecPerKm = 0,
+            validFromHour = 0,
+            validToHour = 0,
+            maxDistancePerRunM = 0,
+        )
+    }
 
     val ruleElement = root["runRuleModel"]
     if (ruleElement == null || ruleElement is JsonNull) {

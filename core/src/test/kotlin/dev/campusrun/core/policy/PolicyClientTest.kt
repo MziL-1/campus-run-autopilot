@@ -21,9 +21,15 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 /**
- * Offline parser tests over the live 7.4.x fixtures captured by Task 2
- * (`policy/run_mode_policy.json` is the decrypted runModePolicy business payload;
- * `policy/geo_fence.json` is the whole decrypted getGeoFenceForRun response).
+ * Offline tests over the live 7.4.x fixtures captured by Task 2 and the production
+ * envelope shape:
+ *
+ * - `policy/run_mode_policy.json` is the **rule body** (the decrypted `data` of
+ *   runModePolicy), which is what `fetch` hands to `parseRunPolicy` after unwrapping.
+ * - `policy/geo_fence.json` is the **whole** decrypted getGeoFenceForRun response
+ *   (`{error, message, data}`), which the parser consumes as-is.
+ * - The `fetch` tests serve the **wrapped** runModePolicy envelope, because that is the
+ *   depth `ApiClient.decode` returns in production (upstream `core/client.py`).
  *
  * The school used for capture has no configured fence (`geoFences` is empty/null), so
  * fence/point geometry is covered by synthetic documents built inline; the live fixture
@@ -32,7 +38,7 @@ import org.junit.jupiter.api.Test
 class PolicyClientTest {
 
     @Test
-    fun `live 7_4 fixture pins window pace and distance cap`() {
+    fun `rule body fixture pins window pace and distance cap`() {
         val policy = parseRunPolicy(fixture("run_mode_policy.json"), fixture("geo_fence.json"))
 
         // runRuleModel.speedTop = 3.0 min/km, speedBottom = 10.0 min/km -> seconds per km.
@@ -50,7 +56,7 @@ class PolicyClientTest {
     }
 
     @Test
-    fun `live 7_4 fixtures have no fence or points and parse as empty`() {
+    fun `rule body fixture has no fence or points and parses as empty`() {
         val policy = parseRunPolicy(fixture("run_mode_policy.json"), fixture("geo_fence.json"))
 
         assertTrue(policy.fence.isEmpty(), "geoFences is empty for this school")
@@ -205,7 +211,9 @@ class PolicyClientTest {
         val paths = mutableListOf<String>()
         val api = apiServing(
             mapOf(
-                "/api/v70103/runModePolicy" to fixtureText("run_mode_policy.json"),
+                // Production depth: ApiClient.decode returns the envelope, so fetch must
+                // unwrap `{error, message, data}` before parsing (upstream get_run_policy).
+                "/api/v70103/runModePolicy" to policyEnvelope(fixtureText("run_mode_policy.json")),
                 "/api/v1/getGeoFenceForRun" to fixtureText("geo_fence.json"),
             ),
             paths,
@@ -220,12 +228,48 @@ class PolicyClientTest {
         assertEquals(600, policy.paceMaxSecPerKm)
         assertEquals(10, policy.validFromHour)
         assertEquals(22, policy.validToHour)
+        assertEquals(2000, policy.maxDistancePerRunM)
+        assertNull(policy.faceWindow)
     }
 
     @Test
-    fun `fetch accepts the out of window empty document and indoor mode uses its own path`() {
+    fun `fetch maps a business error policy envelope to an empty rule but keeps the fence`() {
         val paths = mutableListOf<String>()
-        val api = apiServing(mapOf("/api/v59/indoorRunModePolicy" to "{}"), paths)
+        val api = apiServing(
+            mapOf(
+                "/api/v70103/runModePolicy" to """{"error":-10000,"message":"ERROR","data":null}""",
+                "/api/v1/getGeoFenceForRun" to fixtureText("geo_fence.json"),
+            ),
+            paths,
+        )
+
+        val policy = PolicyClient(api).fetch(Token("session-value", "uid-42", "35102", null), mode = 1)
+
+        // Upstream get_run_policy returns None for a business error -> valid empty policy,
+        // while the fence call still runs and its (empty) geometry is preserved.
+        assertEquals(0, policy.paceMinSecPerKm)
+        assertEquals(0, policy.paceMaxSecPerKm)
+        assertEquals(0, policy.validFromHour)
+        assertEquals(0, policy.validToHour)
+        assertEquals(0, policy.maxDistancePerRunM)
+        assertNull(policy.faceWindow)
+        assertTrue(policy.fence.isEmpty())
+        assertTrue(policy.requiredPoints.isEmpty())
+        assertTrue(policy.optionalPoints.isEmpty())
+    }
+
+    @Test
+    fun `fetch accepts the out of window envelope and indoor mode uses its own path`() {
+        val paths = mutableListOf<String>()
+        val api = apiServing(
+            mapOf(
+                "/api/v59/indoorRunModePolicy" to policyEnvelope(
+                    """{"policy":1,"timestamp":1794816298979,"message":null,"runRuleModel":null}""",
+                ),
+                "/api/v1/getGeoFenceForRun" to """{"error":-10000,"message":"ERROR","data":null}""",
+            ),
+            paths,
+        )
 
         val policy = PolicyClient(api).fetch(Token("session-value", "uid-42", "35102", null), mode = 5)
 
@@ -235,9 +279,28 @@ class PolicyClientTest {
         assertTrue(policy.fence.isEmpty())
     }
 
+    @Test
+    fun `non 10000 policy document is an empty rule not malformed`() {
+        // Also covers the parser-level guard: a document that still carries its own
+        // non-10000 error must behave like the fence envelope, not throw.
+        val envelope = Json.parseToJsonElement(
+            """{"error":-10000,"message":"ERROR","data":{"runRuleModel":{"speedTop":3.0}}}""",
+        )
+
+        val policy = parseRunPolicy(envelope, fixture("geo_fence.json"))
+
+        assertEquals(0, policy.paceMinSecPerKm)
+        assertEquals(0, policy.validFromHour)
+        assertTrue(policy.fence.isEmpty())
+    }
+
     private fun emptyFence(): JsonElement = Json.parseToJsonElement(
         """{"error":10000,"message":"成功","data":{"updateTime":1561910400000,"geoFences":null}}""",
     )
+
+    /** Production runModePolicy depth: `{error, message, data}` with the rule body in `data`. */
+    private fun policyEnvelope(ruleBody: String): String =
+        """{"error":10000,"message":"成功","data":$ruleBody}"""
 
     private fun fenceWithPoints(pointsJson: String): JsonElement = Json.parseToJsonElement(
         """{"error":10000,"message":"成功","data":{"geoFences":[{"id":1,"name":"s","points":$pointsJson}]}}""",
