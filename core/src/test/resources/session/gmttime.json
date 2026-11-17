@@ -1,0 +1,27 @@
+{
+  "source": "reference/upstream/协议/7.3.92/{core/crypto.py,profile/client.py}",
+  "generatedBy": "tools/gen-vectors.py",
+  "response": "server body {\"r\",\"s\",\"v\"}; r = aes128_cbc_encrypt({\"data\": base64(business)}, response_kdf(keyDataOne..Four)); business = {\"error\":10000,\"data\":<server epoch ms>}",
+  "cases": [
+    {
+      "name": "server-ahead-2789ms",
+      "path": "/api/v3/getserver/gmttime",
+      "localMs": 1750123454000,
+      "serverMs": 1750123456789,
+      "aesKeyHex": "30313233343536373839616263646566",
+      "kdfSaltHex": "303132333435363738396162636465666768696a4142434445464748494a4b4c4d4e4f5051525354",
+      "rsaPublicKey": "MIGJAoGBALmmqVPOwY1mTVHGEfg7jHck1MNXsVtUfrqY99bm/W2cjLi3LvG/wMYwbhmf9O+y3CUlZ5g4AMd2Ly4XbWUloG/O8+1USGJ8ddmrzbl8j2EZi0OhpVCYI381+zZ0qa3z1cOuG2XdJnE7pO6Y4JNC37miqMXYmjejVi2QDIbONomfAgMBAAE=",
+      "responseBody": "{\"r\":\"GJJULzYNj1j29e7Jp3RlL1Rz7lT1MvX0Nk3Gi+ByNe6wczcr/Z9LaQd2/RNvu2ObMZM33wnsmmP1S380UmNBsg==\",\"s\":\"0\",\"v\":101}"
+    },
+    {
+      "name": "server-behind-3150ms",
+      "path": "/api/v3/getserver/gmttime",
+      "localMs": 1750123454000,
+      "serverMs": 1750123450850,
+      "aesKeyHex": "30313233343536373839616263646566",
+      "kdfSaltHex": "303132333435363738396162636465666768696a4142434445464748494a4b4c4d4e4f5051525354",
+      "rsaPublicKey": "MIGJAoGBALmmqVPOwY1mTVHGEfg7jHck1MNXsVtUfrqY99bm/W2cjLi3LvG/wMYwbhmf9O+y3CUlZ5g4AMd2Ly4XbWUloG/O8+1USGJ8ddmrzbl8j2EZi0OhpVCYI381+zZ0qa3z1cOuG2XdJnE7pO6Y4JNC37miqMXYmjejVi2QDIbONomfAgMBAAE=",
+      "responseBody": "{\"r\":\"GJJULzYNj1j29e7Jp3RlL1Rz7lT1MvX0Nk3Gi+ByNe6wczcr/Z9LaQd2/RNvu2Ob/vtzHtbqS3+JoUSIbrQM2A==\",\"s\":\"0\",\"v\":101}"
+    }
+  ]
+}

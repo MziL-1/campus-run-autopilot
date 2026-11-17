@@ -28,6 +28,11 @@ The signature vectors (``vectors/sign.json``) come from the same unmodified tree
   vector ``kdfSalt`` necessarily ends with ``ABCDEFGH``.
 * ``token[]``   -- ``core/crypto.py`` ``compute_token_sign`` over the single ``token``
   entry the Kotlin interface exposes.
+* ``tokenFull[]`` -- ``compute_token_sign`` over upstream ``build_headers``' real
+  ``sign_dict`` (``{timeStamp, token, uid}`` + per-request ``sign_params``), i.e. the
+  macro ``ApiClient`` (Task 5) has to reproduce.
+* ``wire[]``    -- ``encrypt_request`` over a compact POST body JSON (same envelope as
+  ``headerSign``), pinned so the Kotlin request-wire helper is cross-checked for bodies.
 * ``settlement[]`` -- ``running/builder.py`` ``compute_sport_signature`` over 31-field
   ``sign_map``s; the emitted ``fields`` are the ``k=v`` strings of upstream's own
   ``compute_original_sign`` (so value formatting/bool lowercasing is upstream's).
@@ -37,6 +42,7 @@ The signature vectors (``vectors/sign.json``) come from the same unmodified tree
 Run: python tools/gen-vectors.py
 Out: core/src/test/resources/vectors/netsec.json
      core/src/test/resources/vectors/sign.json
+     core/src/test/resources/session/gmttime.json
 """
 
 import base64
@@ -53,6 +59,7 @@ UPSTREAM_CRYPTO = UPSTREAM / "core" / "crypto.py"
 UPSTREAM_RUNNING = UPSTREAM / "running"
 OUT_FILE = ROOT / "core" / "src" / "test" / "resources" / "vectors" / "netsec.json"
 SIGN_FILE = ROOT / "core" / "src" / "test" / "resources" / "vectors" / "sign.json"
+SESSION_FILE = ROOT / "core" / "src" / "test" / "resources" / "session" / "gmttime.json"
 
 RSA_MODULUS_BYTES = 128  # upstream REQ RSA key is 1024-bit (core/crypto.py NetSecClient)
 
@@ -230,8 +237,8 @@ def inner_timestamp_ms(seconds):
     return int(seconds) * 1000
 
 
-def header_case(crypto, name, headers, aes_key, kdf_salt, seconds):
-    """One upstream ``encrypt_request`` round producing the exact headerSign value."""
+def pinned_wire(crypto, name, plaintext, aes_key, kdf_salt, seconds):
+    """Run upstream ``encrypt_request`` twice with every random/clock source pinned."""
     if len(aes_key) != 16:
         raise ValueError("aesKey must be 16 bytes")
     if len(kdf_salt) != 40:
@@ -239,8 +246,6 @@ def header_case(crypto, name, headers, aes_key, kdf_salt, seconds):
     # upstream: candidate = str(uuid.uuid4()).replace("-", "") + "ABCDEFGHIJKLMN12"
     if kdf_salt[32:] != b"ABCDEFGH":
         raise ValueError("kdfSalt must end with the upstream fixed UUID suffix ABCDEFGH")
-    if str(headers.get("timeStamp")) != str(inner_timestamp_ms(seconds)):
-        raise ValueError("headers.timeStamp must be the millisecond form of %d" % seconds)
 
     client = crypto.NetSecClient()
     results = []
@@ -253,16 +258,24 @@ def header_case(crypto, name, headers, aes_key, kdf_salt, seconds):
         crypto.time = _FixedTime(seconds + 0.789)
         crypto.os = _DeterministicOs(stream)
         try:
-            headers_json = json.dumps(headers, separators=(",", ":"), ensure_ascii=False)
-            wire, _ = client.encrypt_request(headers_json)
+            wire, _ = client.encrypt_request(plaintext)
         finally:
             crypto.uuid, crypto.random, crypto.time, crypto.os = (
                 real_uuid, real_random, real_time, real_os)
-        results.append((headers_json, json.dumps(wire, separators=(",", ":"))))
-    # Guard: no unpatched random/clock source may leak into the pinned headerSign.
+        results.append(json.dumps(wire, separators=(",", ":")))
+    # Guard: no unpatched random/clock source may leak into the pinned wire.
     if results[0] != results[1]:
-        raise AssertionError("headerSign is not reproducible for case %s" % name)
-    headers_json, header_sign = results[0]
+        raise AssertionError("NetSecKit wire is not reproducible for case %s" % name)
+    return results[0]
+
+
+def header_case(crypto, name, headers, aes_key, kdf_salt, seconds):
+    """One upstream ``encrypt_request`` round producing the exact headerSign value."""
+    if str(headers.get("timeStamp")) != str(inner_timestamp_ms(seconds)):
+        raise ValueError("headers.timeStamp must be the millisecond form of %d" % seconds)
+
+    headers_json = json.dumps(headers, separators=(",", ":"), ensure_ascii=False)
+    header_sign = pinned_wire(crypto, name, headers_json, aes_key, kdf_salt, seconds)
     return {
         "name": name,
         "headerOrder": list(headers.keys()),
@@ -275,6 +288,34 @@ def header_case(crypto, name, headers, aes_key, kdf_salt, seconds):
         ).decode("ascii"),
         "headerSign": header_sign,
     }
+
+
+def wire_cases(crypto):
+    """POST body envelope: ``encrypt_request(compact_body_json)`` -> ``{d,h,k,p,t}``."""
+    aes_key = b"postbodykey00001"
+    kdf_salt = b"abcdefghijklmnopqrstuvwxyz012345ABCDEFGH"
+    seconds = 1750123456
+    bodies = [
+        ("post-body-object", {"runMode": 1, "semesterId": 20241}),
+        ("post-body-empty", {}),
+        ("post-body-utf8", {"address": "北京市海淀区", "runId": "42"}),
+    ]
+    return [
+        {
+            "name": name,
+            "plainText": json.dumps(body, separators=(",", ":"), ensure_ascii=False),
+            "timeStampMs": inner_timestamp_ms(seconds),
+            "aesKeyHex": aes_key.hex(),
+            "kdfSaltHex": kdf_salt.hex(),
+            "rsaPublicKey": base64.b64encode(
+                crypto.base64.b64decode(crypto.REQ_RSA_PKCS1_B64)
+            ).decode("ascii"),
+            "wire": pinned_wire(
+                crypto, name, json.dumps(body, separators=(",", ":"), ensure_ascii=False),
+                aes_key, kdf_salt, seconds),
+        }
+        for name, body in bodies
+    ]
 
 
 def header_cases(crypto):
@@ -357,6 +398,92 @@ def token_cases(crypto):
         }
         for name, token, case_salt in specs
     ]
+
+
+def token_full_cases(crypto):
+    """``build_headers`` sign_dict: ``{timeStamp, token, uid}`` (+ ``sign_params``)."""
+    default_salt = "2slhe02lsfiwowlcixisla_sls-_slaor"
+    specs = [
+        (
+            "session-headers",
+            {"timeStamp": "1750123456789", "token": "tok-0123456789", "uid": "90001"},
+            default_salt,
+        ),
+        (
+            "anonymous-empty-credentials",
+            {"timeStamp": "1750123456789", "token": "", "uid": ""},
+            default_salt,
+        ),
+        (
+            "utf8-credentials-custom-salt",
+            {"timeStamp": "1760000001000", "token": "令牌-测试", "uid": "90002"},
+            "custom-salt-测试",
+        ),
+        (
+            "extra-sign-params",
+            {"timeStamp": "1750123456789", "token": "tok", "uid": "90003",
+             "mode": "1", "runId": "42"},
+            default_salt,
+        ),
+    ]
+    return [
+        {
+            "name": name,
+            "salt": case_salt,
+            "signParams": sign_params,
+            "sign": crypto.compute_token_sign(sign_params, case_salt),
+        }
+        for name, sign_params, case_salt in specs
+    ]
+
+
+def session_cases(crypto):
+    """``profile/client.py`` ``get_server_time``: one GMT envelope per skew direction.
+
+    The server returns the NetSec response envelope ``{"r":..,"s":..,"v":101}``; ``r`` is
+    AES-128-CBC under ``response_kdf(keyDataOne..Four)`` of ``{"data": base64(business)}``,
+    and the business object is ``{"error":10000,"data":<epoch ms>}``. ``s``/``v`` are
+    opaque and ignored by the client (upstream reads only ``r``).
+    """
+    aes_key = b"0123456789abcdef"
+    kdf_salt = b"0123456789abcdefghijABCDEFGHIJKLMNOPQRST"
+    response_key = kdf_seed(crypto, kdf_salt)
+    local_ms = 1750123454000
+    specs = [
+        ("server-ahead-2789ms", local_ms, 2789),
+        ("server-behind-3150ms", local_ms, -3150),
+    ]
+    cases = []
+    for name, case_local_ms, delta_ms in specs:
+        server_ms = case_local_ms + delta_ms
+        business = json.dumps(
+            {"error": 10000, "data": server_ms}, separators=(",", ":")
+        ).encode("utf-8")
+        inner = json.dumps(
+            {"data": base64.b64encode(business).decode("ascii")},
+            separators=(",", ":"),
+        ).encode("utf-8")
+        cipher = crypto.aes128_cbc_encrypt(inner, response_key)
+        if crypto.aes128_cbc_decrypt(cipher, response_key) != inner:
+            raise AssertionError("upstream response round-trip failed for %s" % name)
+        envelope = json.dumps(
+            {"r": base64.b64encode(cipher).decode("ascii"), "s": "0", "v": 101},
+            separators=(",", ":"),
+        )
+        cases.append({
+            "name": name,
+            "path": "/api/v3/getserver/gmttime",
+            "localMs": case_local_ms,
+            "serverMs": server_ms,
+            "aesKeyHex": aes_key.hex(),
+            "kdfSaltHex": kdf_salt.hex(),
+            "rsaPublicKey": base64.b64encode(
+                crypto.base64.b64decode(crypto.REQ_RSA_PKCS1_B64)
+            ).decode("ascii"),
+            "responseBody": envelope,
+        })
+    return cases
+
 
 
 def settlement_case(builder, name, sign_map, salt=None):
@@ -461,16 +588,34 @@ def main():
                       "compute_original_sign",
         "header": header_cases(crypto),
         "token": token_cases(crypto),
+        "tokenFull": token_full_cases(crypto),
+        "wire": wire_cases(crypto),
         "settlement": settlement_cases(builder),
     }
     SIGN_FILE.parent.mkdir(parents=True, exist_ok=True)
     SIGN_FILE.write_text(json.dumps(sign_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print("wrote %s (header=%d, token=%d, settlement=%d)" % (
+    print("wrote %s (header=%d, token=%d, tokenFull=%d, wire=%d, settlement=%d)" % (
         SIGN_FILE.relative_to(ROOT),
         len(sign_payload["header"]),
         len(sign_payload["token"]),
+        len(sign_payload["tokenFull"]),
+        len(sign_payload["wire"]),
         len(sign_payload["settlement"]),
     ))
+
+    session_payload = {
+        "source": "reference/upstream/协议/7.3.92/{core/crypto.py,profile/client.py}",
+        "generatedBy": "tools/gen-vectors.py",
+        "response": "server body {\"r\",\"s\",\"v\"}; r = aes128_cbc_encrypt("
+                    "{\"data\": base64(business)}, response_kdf(keyDataOne..Four)); "
+                    "business = {\"error\":10000,\"data\":<server epoch ms>}",
+        "cases": session_cases(crypto),
+    }
+    SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SESSION_FILE.write_text(
+        json.dumps(session_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print("wrote %s (%d cases)" % (
+        SESSION_FILE.relative_to(ROOT), len(session_payload["cases"])))
 
 
 if __name__ == "__main__":

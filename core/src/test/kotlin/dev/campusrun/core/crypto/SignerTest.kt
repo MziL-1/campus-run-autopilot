@@ -29,6 +29,23 @@ class SignerTest {
         val expected: String,
     )
 
+    private data class FullTokenCase(
+        val name: String,
+        val signParams: Map<String, String>,
+        val salt: String,
+        val expected: String,
+    )
+
+    private data class WireCase(
+        val name: String,
+        val plainText: String,
+        val timeStampMs: Long,
+        val aesKey: ByteArray,
+        val kdfSalt: ByteArray,
+        val rsaPublicKey: String,
+        val expected: String,
+    )
+
     private data class SettlementCase(
         val name: String,
         val fields: List<String>,
@@ -65,6 +82,26 @@ class SignerTest {
         cases.forEach { c ->
             val p = params(signSalt = c.salt)
             assertEquals(c.expected, Signer.tokenSign(c.token, p), "tokenSign ${c.name}")
+        }
+    }
+
+    @Test
+    fun `full tokenSign matches python`() {
+        val cases = fullTokenCases()
+        assertTrue(cases.size >= 3, "expected at least 3 full token vectors, got ${cases.size}")
+        cases.forEach { c ->
+            val p = params(signSalt = c.salt)
+            assertEquals(c.expected, Signer.tokenSign(c.signParams, p), "tokenSign full ${c.name}")
+        }
+    }
+
+    @Test
+    fun `request wire matches python`() {
+        val cases = wireCases()
+        assertTrue(cases.size >= 2, "expected at least 2 request-wire vectors, got ${cases.size}")
+        cases.forEach { c ->
+            val p = params(c.aesKey, c.kdfSalt, c.rsaPublicKey)
+            assertEquals(c.expected, Signer.requestWire(c.plainText, p, c.timeStampMs), "wire ${c.name}")
         }
     }
 
@@ -106,6 +143,36 @@ class SignerTest {
                 token = obj.string("token"),
                 salt = obj.string("salt"),
                 expected = obj.string("sign"),
+            )
+        }
+    }
+
+    private fun fullTokenCases(): List<FullTokenCase> {
+        val root = loadVectors()
+        return root.getValue("tokenFull").jsonArray.map { element ->
+            val obj = element.jsonObject
+            FullTokenCase(
+                name = obj.string("name"),
+                signParams = obj.getValue("signParams").jsonObject.entries
+                    .associate { (key, value) -> key to value.jsonPrimitive.content },
+                salt = obj.string("salt"),
+                expected = obj.string("sign"),
+            )
+        }
+    }
+
+    private fun wireCases(): List<WireCase> {
+        val root = loadVectors()
+        return root.getValue("wire").jsonArray.map { element ->
+            val obj = element.jsonObject
+            WireCase(
+                name = obj.string("name"),
+                plainText = obj.string("plainText"),
+                timeStampMs = obj.string("timeStampMs").toLong(),
+                aesKey = obj.string("aesKeyHex").hexToBytes(),
+                kdfSalt = obj.string("kdfSaltHex").hexToBytes(),
+                rsaPublicKey = obj.string("rsaPublicKey"),
+                expected = obj.string("wire"),
             )
         }
     }

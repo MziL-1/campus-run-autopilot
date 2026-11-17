@@ -47,11 +47,11 @@ import java.util.Locale
  *
  * ### tokenSign
  *
- * Upstream signs a `{timeStamp, token, uid}` dict (plus per-request `sign_params`). This
- * interface only receives the token string, so it signs upstream's canonical form for the
- * single `token` entry — `md5("token=" + token + params.signSalt)`, UTF-8, lower-case hex.
- * Callers that need the full upstream macro must extend this seam before sending live
- * requests (see Task 5).
+ * Upstream `build_headers` signs `{timeStamp, token, uid}` (plus any per-request
+ * `sign_params`). [tokenSign] has two forms: the map form reproduces that macro verbatim
+ * by applying upstream `compute_token_sign` to the caller's dict; the string form is the
+ * convenience overload for the single `token` entry — `md5("token=" + token +
+ * params.signSalt)`.
  *
  * ### settlementDigest
  *
@@ -70,12 +70,32 @@ object Signer {
     private const val HEX = "0123456789abcdef"
 
     fun headerSign(headers: Map<String, String>, params: ProtocolParams): String {
+        val raw = headers["timeStamp"]
+            ?: throw IllegalArgumentException("headerSign requires the millisecond timeStamp header")
+        val millis = raw.toLongOrNull()
+            ?: throw IllegalArgumentException("timeStamp header must be integer epoch milliseconds: $raw")
+        require(millis >= EPOCH_MILLIS_THRESHOLD) {
+            "timeStamp header must be epoch milliseconds, got $raw"
+        }
+        return requestWire(compactJson(headers), params, millis)
+    }
+
+    /**
+     * Upstream `NetSecClient.encrypt_request` for an arbitrary plaintext: wraps [plainText]
+     * (the headers JSON for `headerSign`, the compact body JSON for a POST) into the
+     * `{d,h,k,p,t}` wire JSON. [timeStampMs] yields upstream's inner `int(time.time())`;
+     * callers pass the request's millisecond timestamp so header and body envelopes of one
+     * request agree.
+     */
+    internal fun requestWire(plainText: String, params: ProtocolParams, timeStampMs: Long): String {
         require(params.kdfSalt.size == 4 * KEY_DATA_SEGMENT_BYTES) {
             "kdfSalt must hold the four 10-byte keyData segments (40 bytes), got ${params.kdfSalt.size}"
         }
-        val timestampSeconds = innerTimestampSeconds(headers)
-        val headersJson = compactJson(headers)
-        val data = Base64.getEncoder().encodeToString(headersJson.toByteArray(Charsets.UTF_8))
+        require(timeStampMs >= EPOCH_MILLIS_THRESHOLD) {
+            "timeStamp must be epoch milliseconds, got $timeStampMs"
+        }
+        val timestampSeconds = timeStampMs / 1000
+        val data = Base64.getEncoder().encodeToString(plainText.toByteArray(Charsets.UTF_8))
         // Upstream inner_dict order is keyDataFour, One, Three, Two (core/crypto.py).
         val inner = buildString {
             append("{\"data\":").append(jsonString(data))
@@ -101,7 +121,15 @@ object Signer {
     }
 
     fun tokenSign(token: String, params: ProtocolParams): String =
-        canonicalSign(mapOf("token" to token), params.signSalt)
+        tokenSign(mapOf("token" to token), params)
+
+    /**
+     * Upstream `build_headers` `sign_dict`: `{timeStamp, token, uid}` plus optional
+     * per-request `sign_params`, signed with upstream `compute_token_sign` (same salt and
+     * ordering rules as the string overload).
+     */
+    fun tokenSign(signParams: Map<String, String>, params: ProtocolParams): String =
+        canonicalSign(signParams, params.signSalt)
 
     fun settlementDigest(fields: List<String>, salt: String): String {
         val canonical = fields
@@ -126,23 +154,6 @@ object Signer {
             .sortedWith(compareBy({ it.key.lowercase(Locale.ROOT) }, { it.key }))
             .joinToString("&") { (key, value) -> "$key=$value" }
         return md5Hex((canonical + salt).toByteArray(Charsets.UTF_8))
-    }
-
-    /**
-     * Upstream's inner `int(time.time())`, derived from the mandatory millisecond
-     * `timeStamp` header. A missing, non-integer or seconds-shaped value is a caller bug
-     * (upstream always inserts the ms header before encrypting), so it fails loudly rather
-     * than being guessed or silently "repaired".
-     */
-    private fun innerTimestampSeconds(headers: Map<String, String>): Long {
-        val raw = headers["timeStamp"]
-            ?: throw IllegalArgumentException("headerSign requires the millisecond timeStamp header")
-        val millis = raw.toLongOrNull()
-            ?: throw IllegalArgumentException("timeStamp header must be integer epoch milliseconds: $raw")
-        require(millis >= EPOCH_MILLIS_THRESHOLD) {
-            "timeStamp header must be epoch milliseconds, got $raw"
-        }
-        return millis / 1000
     }
 
     /** Upstream `keyDataOne..Four`: `kdfSalt[10*(n-1):10*n]`, upstream UUID alphabet (ASCII). */
