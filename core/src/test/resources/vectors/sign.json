@@ -95,6 +95,121 @@
         "zeta=true"
       ],
       "signature": "f2419552b7ff121ad7446de0c43cc510"
+    },
+    {
+      "name": "track-derived-760s",
+      "salt": "2slhe02lsfiwowlcixisla_sls-_slaor",
+      "fieldCount": 31,
+      "fields": [
+        "address=",
+        "avgPower=150",
+        "avgStepFreq=156",
+        "calorie=135",
+        "complete=true",
+        "errorCode=0",
+        "faceCheck=0",
+        "geeToken=",
+        "getPrize=false",
+        "goalId=null",
+        "policy=1",
+        "selDistance=2000",
+        "selRunTime=0",
+        "selectedUnid=55001",
+        "speed=2742",
+        "sportType=1",
+        "startTime=1750123456000",
+        "status=1",
+        "stopTime=1750124216000",
+        "themeId=0",
+        "totalAscent=0",
+        "totalDis=2084",
+        "totalSteps=1976",
+        "totalTime=760",
+        "uid=90001",
+        "unCompleteReason=0",
+        "unauthorized=0",
+        "useMobilityTools=0",
+        "uuid=0b9c2f8e-4b6a-4f1e-9d2c-7a5e3f1b8c4d",
+        "validDis=2084",
+        "validTime=760"
+      ],
+      "signature": "338eef3f4f46a4a1520e7e80da08e680",
+      "originalSign": "address=&avgPower=150&avgStepFreq=156&calorie=135&complete=true&errorCode=0&faceCheck=0&geeToken=&getPrize=false&goalId=null&policy=1&selDistance=2000&selRunTime=0&selectedUnid=55001&speed=2742&sportType=1&startTime=1750123456000&status=1&stopTime=1750124216000&themeId=0&totalAscent=0&totalDis=2084&totalSteps=1976&totalTime=760&uid=90001&unCompleteReason=0&unauthorized=0&useMobilityTools=0&uuid=0b9c2f8e-4b6a-4f1e-9d2c-7a5e3f1b8c4d&validDis=2084&validTime=760",
+      "inputs": {
+        "track": {
+          "durationSec": 760,
+          "lat": 34.705,
+          "lng0": 113.7,
+          "lngStep": 3e-05,
+          "speedMps": 2.73,
+          "cadence": 156.0
+        },
+        "handle": {
+          "uid": 90001,
+          "unid": 55001,
+          "uuid": "0b9c2f8e-4b6a-4f1e-9d2c-7a5e3f1b8c4d",
+          "startTimeMs": 1750123456000,
+          "stopTimeMs": 1750124216000
+        },
+        "requiredPoints": [
+          [
+            34.7018,
+            113.7021
+          ],
+          [
+            34.7042,
+            113.7055
+          ]
+        ],
+        "derived": {
+          "totalDis": 2084,
+          "totalSteps": 1976,
+          "avgStepFreq": 156,
+          "speed": 2742,
+          "complete": true,
+          "unCompleteReason": 0
+        }
+      },
+      "fivePointJson": "{\"useZip\":false,\"fivePointJson\":\"[{\\\"lat\\\":34.7018,\\\"lon\\\":113.7021,\\\"isFixed\\\":1,\\\"isPass\\\":true,\\\"pointName\\\":\\\"P_1\\\",\\\"position\\\":1},{\\\"lat\\\":34.7042,\\\"lon\\\":113.7055,\\\"isFixed\\\":1,\\\"isPass\\\":true,\\\"pointName\\\":\\\"P_2\\\",\\\"position\\\":2}]\",\"runAreaId\":-1,\"freedomShowFence\":false}",
+      "bucketCount": 76,
+      "firstSpeedBucket": {
+        "distance": 27.42,
+        "beginTime": 1750123456000,
+        "endTime": 1750123466000,
+        "flag": 0,
+        "state": 0,
+        "queueNum": 1
+      },
+      "lastSpeedBucket": {
+        "distance": 27.43,
+        "beginTime": 1750124206000,
+        "endTime": 1750124216000,
+        "flag": 0,
+        "state": 0,
+        "queueNum": 76
+      },
+      "firstStepBucket": {
+        "stepsNum": 26,
+        "beginTime": 1750123456000,
+        "endTime": 1750123466000,
+        "flag": 0,
+        "maxDiff": 0.0,
+        "minDiff": 0.0,
+        "avgDiff": 0.0,
+        "state": 0,
+        "queueNum": 1
+      },
+      "lastStepBucket": {
+        "stepsNum": 26,
+        "beginTime": 1750124206000,
+        "endTime": 1750124216000,
+        "flag": 0,
+        "maxDiff": 0.0,
+        "minDiff": 0.0,
+        "avgDiff": 0.0,
+        "state": 0,
+        "queueNum": 76
+      }
     }
   ],
   "header": [

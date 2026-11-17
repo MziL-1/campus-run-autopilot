@@ -38,6 +38,12 @@ The signature vectors (``vectors/sign.json``) come from the same unmodified tree
   ``compute_original_sign`` (so value formatting/bool lowercasing is upstream's).
   ``running/`` is loaded as a synthetic package so ``running/__init__.py`` (which
   pulls in the Python>=3.12-only ``client.py`` f-string) is never imported.
+  The last case (``track-derived-760s``) is built from a *fixed synthetic track*
+  through the same field derivations upstream ``build_submission_payload`` applies
+  (``avgStepFreq``/``speed``/``complete`` formulas, ``stop-start == duration*1000``
+  from ``consistency.validate_totals``), plus the ``fivePointJson`` envelope and the
+  first/last 10 s buckets straight out of upstream ``time_buckets`` -- it is the
+  golden Task 8's ``Settlement.buildRequest`` test reconstructs end to end.
 
 Run: python tools/gen-vectors.py
 Out: core/src/test/resources/vectors/netsec.json
@@ -503,7 +509,135 @@ def settlement_case(builder, name, sign_map, salt=None):
     }
 
 
-def settlement_cases(builder):
+def settlement_build_case(builder, consistency, models):
+    """Track-derived settlement golden for Task 8's Settlement.buildRequest test.
+
+    The fixed inputs below mirror the Kotlin ``SettlementTest`` fixture exactly; every
+    derived value follows upstream ``running/builder.py`` ``build_submission_payload``:
+
+    - ``totalDis``  = round(haversine path length of the fixed track) -- the Kotlin port
+      derives the same number from ``Geo.pathLengthM`` (same radius, same formula).
+    - ``totalSteps``= round(sum(cadence * dt) / 60.0): ``TrackPoint.stepRateHz`` carries
+      steps-per-minute, so cadence*dt/60 is the step count of each 1 s interval
+      (upstream's own ``avgStepFreq`` then confirms the unit: steps/min).
+    - ``avgStepFreq`` = round(totalSteps * 60.0 / totalTime)   (builder.py:161)
+    - ``speed``       = round((totalDis / totalTime) * 1000)   (builder.py:162)
+    - ``complete``/``unCompleteReason``                        (builder.py:159-160)
+    - ``stop - start == duration * 1000`` is required by consistency.validate_totals:48,
+      so the golden handle timestamps are pinned to the duration.
+    """
+    duration = 760
+    lat, lng0, lng_step, speed_mps, cadence = 34.705, 113.7, 0.00003, 2.73, 156.0
+    uid, unid = 90001, 55001
+    uuid_str = "0b9c2f8e-4b6a-4f1e-9d2c-7a5e3f1b8c4d"
+    start_ms, stop_ms = 1750123456000, 1750124216000
+    sel_distance, sel_run_time, policy = 2000, 0, 1
+    calorie, avg_power = 135, 150
+    required_points = [(34.7018, 113.7021), (34.7042, 113.7055)]
+
+    if stop_ms - start_ms != duration * 1000:
+        raise AssertionError("golden handle timestamps must span the track duration")
+    # Track fixture: 1 Hz samples, straight east line (identical arithmetic in Kotlin).
+    track = [(lat, lng0 + i * lng_step, i, speed_mps, cadence) for i in range(duration + 1)]
+    path_m = sum(
+        consistency.distance(track[i][:2], track[i + 1][:2]) for i in range(duration)
+    )
+    total_dis = round(path_m)
+    total_steps = round(sum(p[4] * 1 for p in track[:duration]) / 60.0)
+    avg_step_freq = round(total_steps * 60.0 / duration)
+    speed_val = round((total_dis / duration) * 1000)
+    complete = (total_dis >= sel_distance) and (duration >= sel_run_time)
+    un_complete_reason = 0 if complete else 10
+
+    sign_map = {
+        "address": "",
+        "avgPower": avg_power,
+        "avgStepFreq": avg_step_freq,
+        "calorie": calorie,
+        "complete": complete,
+        "errorCode": 0,
+        "faceCheck": 0,
+        "geeToken": "",
+        "getPrize": False,
+        "goalId": "null",
+        "policy": policy,
+        "selDistance": sel_distance,
+        "selRunTime": sel_run_time,
+        "selectedUnid": unid,
+        "speed": speed_val,
+        "sportType": 1,
+        "startTime": start_ms,
+        "status": 1,
+        "stopTime": stop_ms,
+        "themeId": 0,
+        "totalAscent": 0,
+        "totalDis": total_dis,
+        "totalSteps": total_steps,
+        "totalTime": duration,
+        "uid": uid,
+        "unCompleteReason": un_complete_reason,
+        "unauthorized": 0,
+        "useMobilityTools": 0,
+        "uuid": uuid_str,
+        "validDis": total_dis,
+        "validTime": duration,
+    }
+    if len(sign_map) != 31:
+        raise AssertionError("track-derived settlement sign_map must have 31 fields")
+    signature = builder.compute_sport_signature(sign_map)
+    original = builder.compute_original_sign(sign_map)
+
+    # fivePointJson: upstream builder.py:210-219 envelope for sport_type=1, run_area_id=-1.
+    inner = [
+        {"lat": p[0], "lon": p[1], "isFixed": 1, "isPass": True,
+         "pointName": "P_%d" % (i + 1), "position": i + 1}
+        for i, p in enumerate(required_points)
+    ]
+    five_point_json = json.dumps({
+        "useZip": False,
+        "fivePointJson": json.dumps(inner, separators=(",", ":")),
+        "runAreaId": -1,
+        "freedomShowFence": False,
+    }, separators=(",", ":"))
+
+    # First/last 10 s buckets straight from upstream time_buckets + models to_dict.
+    buckets = list(consistency.time_buckets(duration, total_steps, start_ms, stop_ms, total_dis))
+
+    def speed_bucket(index):
+        begin, end, _count, length = buckets[index]
+        return models.SpeedBucket(length, begin, end, queueNum=index + 1).to_dict()
+
+    def step_bucket(index):
+        begin, end, count, _length = buckets[index]
+        return models.StepBucket(count, begin, end, queueNum=index + 1).to_dict()
+
+    return {
+        "name": "track-derived-760s",
+        "salt": builder.SPORT_STATIC_SALT,
+        "fieldCount": 31,
+        "fields": original.split("&"),
+        "signature": signature,
+        "originalSign": original,
+        "inputs": {
+            "track": {"durationSec": duration, "lat": lat, "lng0": lng0,
+                      "lngStep": lng_step, "speedMps": speed_mps, "cadence": cadence},
+            "handle": {"uid": uid, "unid": unid, "uuid": uuid_str,
+                       "startTimeMs": start_ms, "stopTimeMs": stop_ms},
+            "requiredPoints": [list(p) for p in required_points],
+            "derived": {"totalDis": total_dis, "totalSteps": total_steps,
+                        "avgStepFreq": avg_step_freq, "speed": speed_val,
+                        "complete": complete, "unCompleteReason": un_complete_reason},
+        },
+        "fivePointJson": five_point_json,
+        "bucketCount": len(buckets),
+        "firstSpeedBucket": speed_bucket(0),
+        "lastSpeedBucket": speed_bucket(len(buckets) - 1),
+        "firstStepBucket": step_bucket(0),
+        "lastStepBucket": step_bucket(len(buckets) - 1),
+    }
+
+
+def settlement_cases(builder, consistency, models):
     base = {
         "address": "",
         "avgPower": 150,
@@ -561,6 +695,7 @@ def settlement_cases(builder):
         settlement_case(builder, "31-fields-complete", base),
         settlement_case(builder, "31-fields-incomplete", incomplete),
         settlement_case(builder, "mixed-case-keys-custom-salt", mixed, "custom-salt-测试"),
+        settlement_build_case(builder, consistency, models),
     ]
 
 
@@ -578,6 +713,8 @@ def main():
     print("wrote %s (%d cases)" % (OUT_FILE.relative_to(ROOT), len(payload["cases"])))
 
     builder = load_upstream_running(UPSTREAM_RUNNING)
+    consistency = sys.modules["upstream_running.consistency"]
+    models = sys.modules["upstream_running.models"]
     sign_payload = {
         "source": "reference/upstream/协议/7.3.92/{core/crypto.py,core/client.py,running/builder.py}",
         "generatedBy": "tools/gen-vectors.py",
@@ -590,7 +727,7 @@ def main():
         "token": token_cases(crypto),
         "tokenFull": token_full_cases(crypto),
         "wire": wire_cases(crypto),
-        "settlement": settlement_cases(builder),
+        "settlement": settlement_cases(builder, consistency, models),
     }
     SIGN_FILE.parent.mkdir(parents=True, exist_ok=True)
     SIGN_FILE.write_text(json.dumps(sign_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
