@@ -15,6 +15,9 @@ import okhttp3.Request
  * [RemoteVersionInfo] wins; every mirror failure (transport, HTTP status, unparsable
  * body) is written to [log] and skipped — never thrown — and when no mirror produces a
  * document [check] returns `null`, so the caller simply keeps the bundled config.
+ * The decoder is forward-tolerant (unknown fields of a future schema version are
+ * ignored — spec §5.6 "旧版本 APK 兼容读取"), so schema growth never disables the
+ * channel for old builds.
  *
  * No script engine (spec §5.6 热更边界): the document is data only. The single
  * logical-level change it carries, [RemoteVersionInfo.minApkVersionCode], surfaces
@@ -53,7 +56,7 @@ class UpdateChecker(
             }
             if (body == null) continue
             try {
-                return Json.decodeFromString(RemoteVersionInfo.serializer(), body)
+                return VERSION_JSON.decodeFromString(RemoteVersionInfo.serializer(), body)
             } catch (e: Exception) {
                 log("update: mirror $url served an unparsable version document: $e")
             }
@@ -71,5 +74,13 @@ class UpdateChecker(
     private companion object {
         /** `config/version.json` relative to each mirror root (repo sample lives there). */
         const val VERSION_PATH = "/config/version.json"
+
+        /**
+         * Forward-tolerant decoder: spec §5.6 "配置 schema 版本化，旧版本 APK 兼容读取" —
+         * a field added by a future schema version must not make an old build's [check]
+         * fail to parse (that would silently stop the update channel from ever telling
+         * those old installs about `minApkVersionCode`).
+         */
+        val VERSION_JSON = Json { ignoreUnknownKeys = true }
     }
 }

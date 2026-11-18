@@ -15,9 +15,10 @@ import java.security.SecureRandom
  *
  * The Android implementation (`EncryptedSharedPreferences`-backed) lands in Task 12;
  * [FileParamsKeyStore] is the file-based JVM implementation for tests and other plain-JVM
- * consumers. Any failure from [load] or [save] means "persistence unavailable" and the
- * store falls back to the bundled params — first-run generation must never brick a fresh
- * install.
+ * consumers. Any failure from [load] or [save] means "persistence unavailable", is
+ * written to the owning store's log seam (never silent — a store stuck on the shared
+ * bundled fallback must be observable), and the store falls back to the bundled params —
+ * first-run generation must never brick a fresh install.
  */
 interface ParamsKeyStore {
 
@@ -56,7 +57,12 @@ class FileParamsKeyStore(private val file: File) : ParamsKeyStore {
  *    request anyway (`NetSecClient.encrypt_request`), so any valid-length key is
  *    wire-compatible, while one pinned key shared by all installs would correlate every
  *    request (T3 watch item). When persistence is unavailable, the bundled values remain
- *    the fallback — a fresh install always gets working params.
+ *    the fallback — a fresh install always gets working params. Both failure paths are
+ *    written to [log] (injectable, stderr by default — same seam pattern as
+ *    [UpdateChecker]) so an install stuck on the shared bundled pin is diagnosable
+ *    instead of silently correlated; the resolved decision is memoised for process
+ *    stability (a mid-run key switch would churn keys within one run), so recovery means
+ *    a new store instance, not a live retry.
  * 2. **Remote config never ships keys.** [applyRemote] parses a remote params document
  *    that deliberately has *no* `aesKey`/`kdfSalt` fields: unknown keys are ignored
  *    whatever shape they arrive in, so the merge — restricted to hot-updatable non-key
@@ -76,6 +82,7 @@ class FileParamsKeyStore(private val file: File) : ParamsKeyStore {
 class ParamsStore(
     val bundled: ProtocolParams,
     private val keyStore: ParamsKeyStore,
+    private val log: (String) -> Unit = { message -> System.err.println(message) },
 ) {
 
     /** Hot-merged params (keys always overlaid from persistence/bundled), `null` before the first [applyRemote]. */
@@ -123,13 +130,26 @@ class ParamsStore(
         cachedKeys ?: synchronized(this) { cachedKeys ?: initialiseKeys().also { cachedKeys = it } }
 
     private fun initialiseKeys(): Pair<ByteArray, ByteArray> {
-        val persisted = runCatching { keyStore.load() }.getOrNull()
+        val persisted = try {
+            keyStore.load()
+        } catch (e: Exception) {
+            log("params: key store load failed, treating as a fresh install: $e")
+            null
+        }
         if (persisted != null && persisted.size == BLOB_BYTES) {
             return persisted.copyOfRange(0, AES_KEY_BYTES) to persisted.copyOfRange(AES_KEY_BYTES, BLOB_BYTES)
         }
         // Fresh install (or unreadable blob): generate once, then try to persist.
         val fresh = ByteArray(BLOB_BYTES).also { SECURE_RANDOM.nextBytes(it) }
-        val saved = runCatching { keyStore.save(fresh) }.isSuccess
+        val saved = try {
+            keyStore.save(fresh)
+            true
+        } catch (e: Exception) {
+            // The dangerous case: this install now shares the bundled key with everyone
+            // else — must be observable, never silent (review I2).
+            log("params: key store save failed, staying on the SHARED bundled keys until persistence works: $e")
+            false
+        }
         return if (saved) {
             fresh.copyOfRange(0, AES_KEY_BYTES) to fresh.copyOfRange(AES_KEY_BYTES, BLOB_BYTES)
         } else {

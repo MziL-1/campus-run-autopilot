@@ -94,6 +94,28 @@ class UpdateCheckerTest {
     }
 
     @Test
+    fun `version json with unknown future fields still decodes for old apks`() {
+        // Spec §5.6 schema versioning ("旧版本 APK 兼容读取"): the first field a future
+        // schema adds must not make an old build's check() fail — that would silently
+        // drop exactly the old installs that need the minApkVersionCode bump.
+        val healthy = mirror(
+            MockResponse().setBody(
+                """{"minApkVersionCode":3,"configVersion":2,"protocolParamsVersion":5,""" +
+                    """"apkMirrors":["https://mirror.invalid/a.apk"],"futureChannelField":{"nested":true}}""",
+            ),
+        )
+
+        val info = UpdateChecker(log = logs::add).check(listOf(baseUrl(healthy)))
+
+        assertNotNull(info, "a newer version.json with extra fields must still parse")
+        assertEquals(3, info!!.minApkVersionCode)
+        assertEquals(2, info.configVersion)
+        assertEquals(5, info.protocolParamsVersion)
+        assertEquals(listOf("https://mirror.invalid/a.apk"), info.apkMirrors)
+        assertTrue(logs.isEmpty(), "a tolerated unknown field is not a mirror failure: $logs")
+    }
+
+    @Test
     fun `repo sample version json decodes through the real checker`() {
         val healthy = mirror(MockResponse().setBody(sampleVersionJson()))
 

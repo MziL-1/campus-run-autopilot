@@ -122,10 +122,30 @@ class ParamsStoreTest {
             override fun save(keys: ByteArray): Unit = throw IOException("storage unavailable")
         }
 
-        val params = ParamsStore(bundled, broken).current()
+        // No-op log sink: the default stderr sink would only repeat what the dedicated
+        // observability test below asserts.
+        val params = ParamsStore(bundled, broken, log = {}).current()
 
         assertArrayEquals(bundled.aesKey, params.aesKey, "bundled values are the fallback when persistence is down")
         assertArrayEquals(bundled.kdfSalt, params.kdfSalt, "bundled values are the fallback when persistence is down")
         assertTrue(params.aesKey.isNotEmpty() && params.kdfSalt.isNotEmpty())
+    }
+
+    @Test
+    fun `key store failures are logged through the seam instead of failing silently`() {
+        // A permanently failing store pins this install to the SHARED bundled key — the
+        // exact cross-install correlation risk the per-install ruling exists to prevent,
+        // so both failure paths must be observable to callers (UpdateChecker's log seam).
+        val logs = mutableListOf<String>()
+        val broken = object : ParamsKeyStore {
+            override fun load(): ByteArray = throw IOException("storage unavailable")
+            override fun save(keys: ByteArray): Unit = throw IOException("storage unavailable")
+        }
+
+        val params = ParamsStore(bundled, broken, log = logs::add).current()
+
+        assertArrayEquals(bundled.aesKey, params.aesKey, "fallback behaviour is unchanged by logging")
+        assertTrue(logs.any { message -> message.contains("load") }, "load failure must be logged: $logs")
+        assertTrue(logs.any { message -> message.contains("save") }, "save failure must be logged: $logs")
     }
 }
