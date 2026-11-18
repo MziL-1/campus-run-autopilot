@@ -1,0 +1,9 @@
+{
+  "minApkVersionCode": 1,
+  "configVersion": 1,
+  "protocolParamsVersion": 1,
+  "apkMirrors": [
+    "https://github.com/OWNER/REPO/releases/download/v0.1.0/app-release.apk",
+    "https://cdn.example.invalid/campusrun/v0.1.0/app-release.apk"
+  ]
+}
