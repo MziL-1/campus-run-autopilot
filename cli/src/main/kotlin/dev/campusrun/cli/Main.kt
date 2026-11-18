@@ -159,7 +159,7 @@ internal fun executeRun(
     distanceM: Int,
     durationSec: Int,
     seed: Long,
-    runsToday: Int,
+    runsToday: Int?,
     log: (String) -> Unit = {},
 ): RunOutcome {
     val params = productionParams()
@@ -191,6 +191,12 @@ internal fun executeRun(
             "policy",
             "no rule body advertised (outside the school run window, or session rejected) — not submitting",
         )
+    }
+
+    // Fail-closed admission for the 每日次数上限 gate: an advertised daily limit without
+    // an explicit --runs-today must refuse here, before synthesis or any submission.
+    dailyLimitAdmission(runsToday, policy)?.let { message ->
+        throw StageFailure("gate", message)
     }
 
     // Five-point answers must look like a campus: guards the no-fence anchor path
@@ -248,7 +254,7 @@ internal fun executeRun(
 
     val nowMs = System.currentTimeMillis() + skewMs
     val violations = RunPolicyValidator.validate(track, policy, nowMs) +
-        RunPolicyValidator.validateDailyLimit(runsToday, policy)
+        RunPolicyValidator.validateDailyLimit(runsToday ?: 0, policy)
     if (violations.isNotEmpty()) {
         log("gate: REFUSED — ${violations.joinToString("；")}")
         return RunOutcome(skewMs, policy, track.size, violations, uploaded = false, rrid = null, record = null)
@@ -314,6 +320,19 @@ private fun deriveFence(checkpoints: List<LatLng>): List<LatLng> {
 /** ~110 m of padding in degrees; the floor keeps a degenerate (single-point) box usable. */
 private const val FENCE_PAD_DEG = 0.001
 private const val FENCE_MIN_HALF_DEG = 0.0015
+
+/**
+ * Fail-closed admission for the brief's 每日次数上限 gate (review fix): when the school
+ * advertises a daily limit, the operator must state today's count explicitly — an absent
+ * `--runs-today` must not read as "0 runs today". Returns the refusal message, or null to
+ * proceed (the count then flows into [RunPolicyValidator.validateDailyLimit]).
+ */
+internal fun dailyLimitAdmission(runsToday: Int?, policy: RunPolicy): String? =
+    if (policy.dailyRunLimit > 0 && runsToday == null) {
+        "dailyRunLimit=${policy.dailyRunLimit} but --runs-today not supplied — pass --runs-today <k> (0 if none yet)"
+    } else {
+        null
+    }
 
 // ---------------------------------------------------------------- subcommands
 
@@ -412,13 +431,13 @@ private fun runCommand(args: List<String>): Int {
     }
 }
 
-private data class RunOptions(val distance: Int, val time: Int, val seed: Long, val runsToday: Int)
+internal data class RunOptions(val distance: Int, val time: Int, val seed: Long, val runsToday: Int?)
 
-private fun parseRunOptions(args: List<String>): RunOptions? {
+internal fun parseRunOptions(args: List<String>): RunOptions? {
     var distance: Int? = null
     var time: Int? = null
     var seed = Random.nextLong()
-    var runsToday = 0
+    var runsToday: Int? = null
     var index = 0
     while (index < args.size) {
         val flag = args[index]
@@ -445,7 +464,7 @@ private fun parseRunOptions(args: List<String>): RunOptions? {
     val finalDistance = distance ?: return runUsage("缺少 --distance <米>")
     val finalTime = time ?: return runUsage("缺少 --time <秒>")
     if (finalDistance <= 0 || finalTime <= 0) return runUsage("--distance/--time 必须为正")
-    if (runsToday < 0) return runUsage("--runs-today 必须非负")
+    if (runsToday != null && runsToday < 0) return runUsage("--runs-today 必须非负")
     return RunOptions(finalDistance, finalTime, seed, runsToday)
 }
 
