@@ -39,7 +39,6 @@ class SessionManager(
     }
 
     private fun applyToApi(token: Token?) {
-        api.uid = token?.uid
-        api.token = token?.value
+        api.setCredentials(token?.uid, token?.value)
     }
 }

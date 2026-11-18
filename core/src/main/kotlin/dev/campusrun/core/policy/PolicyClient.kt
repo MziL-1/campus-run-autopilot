@@ -31,8 +31,7 @@ class PolicyClient(val api: ApiClient) {
     fun fetch(token: Token, mode: Int): RunPolicy {
         // The token is the request identity: apply it like SessionManager would, so callers
         // cannot accidentally fetch policy with a stale/absent header pair.
-        api.uid = token.uid
-        api.token = token.value
+        api.setCredentials(token.uid, token.value)
 
         val policyPath = if (mode == INDOOR_MODE) INDOOR_POLICY_PATH else RUN_POLICY_PATH
         val policy = api.post(

@@ -87,8 +87,7 @@ class RunUploader(
 
     fun uploadTrack(token: Token, track: List<TrackPoint>): UploadHandle {
         // The token is the request identity (same contract as PolicyClient/HistoryClient).
-        api.uid = token.uid
-        api.token = token.value
+        api.setCredentials(token.uid, token.value)
 
         val totals = deriveTotals(track)
         val stopTimeMs = System.currentTimeMillis() + timeSync.serverOffsetMs()

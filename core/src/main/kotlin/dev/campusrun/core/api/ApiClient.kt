@@ -44,6 +44,14 @@ import java.util.UUID
  * so header and body envelopes of the same request agree. Non-2xx responses throw
  * [IOException]; upstream instead returns an `{"error":..}` object, so callers that mirror
  * upstream's fallbacks (e.g. [dev.campusrun.core.session.TimeSync]) catch it.
+ *
+ * Session credentials live in one immutable holder (T5 review ruling): [execute] snapshots
+ * it **once** per request, so a concurrent session swap can never sign a request from a
+ * torn uid/token pair. [postLogin] is the narrow tokenSign-free seam for the upstream login
+ * envelope (`login/client.py:60-79`): upstream builds its own headers there — static
+ * identity placeholders plus `Authorization` — and computes no `tokenSign`; those headers
+ * arrive verbatim through `extraHeaders` and are still covered by `headerSign`. Existing
+ * [get]/[post] behavior is byte-identical.
  */
 class ApiClient(
     private val params: ProtocolParams,
@@ -52,11 +60,22 @@ class ApiClient(
     private val deviceHeaders: Map<String, String> = emptyMap(),
 ) {
 
+    /** One immutable session snapshot; written only through [setCredentials]. */
+    private data class Credentials(val uid: String?, val token: String?)
+
+    @Volatile
+    private var credentials: Credentials = Credentials(null, null)
+
     /** Upstream `BaseNetSecClient.uid`; `null` omits the header (upstream: `None` or `"-1"`). */
-    var uid: String? = null
+    val uid: String? get() = credentials.uid
 
     /** Upstream `BaseNetSecClient.token`; `null` omits the header. */
-    var token: String? = null
+    val token: String? get() = credentials.token
+
+    /** Applies uid+token in a single volatile write — never a torn pair (T5 ruling). */
+    fun setCredentials(uid: String?, token: String?) {
+        credentials = Credentials(uid, token)
+    }
 
     private val baseUrl = baseUrl.trimEnd('/')
 
@@ -64,21 +83,44 @@ class ApiClient(
 
     fun post(path: String, body: JsonElement): JsonElement = execute(path, body = body.toString())
 
-    private fun execute(path: String, body: String?): JsonElement {
+    /**
+     * Upstream `LoginClient.execute_request` (`login/client.py:60-79`): the login envelope
+     * carries no session headers and no computed `tokenSign` — the static identity
+     * placeholders and `Authorization` arrive verbatim through [extraHeaders] (upstream
+     * signs them as part of `DEFAULT_DEVICE_CONFIG`), while `headerSign` still covers the
+     * final header map exactly as upstream does.
+     */
+    fun postLogin(
+        path: String,
+        body: JsonElement,
+        extraHeaders: Map<String, String> = emptyMap(),
+    ): JsonElement = execute(path, body = body.toString(), extraHeaders = extraHeaders, loginEnvelope = true)
+
+    private fun execute(
+        path: String,
+        body: String?,
+        extraHeaders: Map<String, String> = emptyMap(),
+        loginEnvelope: Boolean = false,
+    ): JsonElement {
+        val session = credentials // single snapshot per request (T5 ruling)
         val timestampMs = System.currentTimeMillis()
         val headers = LinkedHashMap<String, String>(deviceHeaders)
         headers["timeStamp"] = timestampMs.toString()
         headers["nonce"] = UUID.randomUUID().toString()
-        uid?.let { headers["uid"] = it }
-        token?.let { headers["token"] = it }
-        headers["tokenSign"] = Signer.tokenSign(
-            linkedMapOf(
-                "timeStamp" to timestampMs.toString(),
-                "token" to (token ?: ""),
-                "uid" to (uid ?: ""),
-            ),
-            params,
-        )
+        if (!loginEnvelope) {
+            session.uid?.let { headers["uid"] = it }
+            session.token?.let { headers["token"] = it }
+            headers["tokenSign"] = Signer.tokenSign(
+                linkedMapOf(
+                    "timeStamp" to timestampMs.toString(),
+                    "token" to (session.token ?: ""),
+                    "uid" to (session.uid ?: ""),
+                ),
+                params,
+            )
+        }
+        // Upstream applies custom headers (Authorization) before computing headerSign.
+        extraHeaders.forEach { (name, value) -> headers[name] = value }
         // Upstream adds headerSign only after encrypting the header map (it is not signed).
         val headerSign = Signer.headerSign(headers, params)
 

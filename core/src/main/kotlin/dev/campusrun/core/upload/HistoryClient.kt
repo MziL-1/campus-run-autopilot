@@ -38,8 +38,7 @@ class HistoryClient(val api: ApiClient) {
 
     fun latest(token: Token): RunRecord? {
         // The token is the request identity (same contract as PolicyClient/RunUploader).
-        api.uid = token.uid
-        api.token = token.value
+        api.setCredentials(token.uid, token.value)
 
         val payload = api.post(
             RECORDS_PATH,
