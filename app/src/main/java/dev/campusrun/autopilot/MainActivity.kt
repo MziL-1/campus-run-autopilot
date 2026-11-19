@@ -10,17 +10,31 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import dev.campusrun.app.data.AndroidParamsKeyStore
 import dev.campusrun.app.data.AndroidTokenStore
 import dev.campusrun.app.data.DeviceIdentitySnapshot
+import dev.campusrun.app.diag.DiagnosticsScreen
+import dev.campusrun.app.home.CoreHomeData
+import dev.campusrun.app.home.HomeScreen
+import dev.campusrun.app.home.HomeViewModel
 import dev.campusrun.app.login.ApiAuthenticator
-import dev.campusrun.app.login.LoggedInScreen
 import dev.campusrun.app.login.LoginScreen
 import dev.campusrun.app.login.LoginViewModel
+import dev.campusrun.app.run.CoreRunStages
+import dev.campusrun.app.run.RunScreen
+import dev.campusrun.app.run.RunViewModel
 import dev.campusrun.core.api.ApiClient
 import dev.campusrun.core.config.ParamsStore
 import dev.campusrun.core.config.ProtocolParams
+import dev.campusrun.core.config.RemoteVersionInfo
+import dev.campusrun.core.config.UpdateChecker
+import dev.campusrun.core.diag.RedactedLog
 import dev.campusrun.core.identity.DeviceIdentity
 import dev.campusrun.core.session.SessionManager
 import dev.campusrun.core.session.Token
@@ -32,9 +46,10 @@ import okhttp3.Response
 import java.net.InetAddress
 
 /**
- * Wiring host for Task 12: builds the object graph (encrypted stores → params →
- * ApiClient → SessionManager → Authenticator → LoginViewModel), restores a persisted
- * session on cold start, and hosts [LoginScreen] until login succeeds.
+ * Wiring host for the full product flow (T12 login graph + T13 screens): builds the object
+ * graph (encrypted stores → params → ApiClient → SessionManager → Authenticator →
+ * ViewModels), restores a persisted session on cold start, runs the startup update check,
+ * and hosts 登录 → 首页 → 一键跑 → 进度/历史 → 导出诊断 behind one Compose `Route` state.
  */
 class MainActivity : ComponentActivity() {
 
@@ -108,19 +123,100 @@ class MainActivity : ComponentActivity() {
 
         val vm = LoginViewModel(ApiAuthenticator(api, deviceModel = deviceModel, osVersion = osVersion))
 
+        // Diagnostics log (spec §6.3): in-memory, redacted at write time; the export screen
+        // hands it to Task 11's DiagnosticExport together with the config version and the
+        // recent-run summary.
+        val diagLog = RedactedLog()
+        diagLog.w("app", "cold start; session=${if (restored != null) "restored" else "absent"}")
+
+        // Startup update check (spec §5.6 / G4 / R5): version.json on a background thread —
+        // every mirror failure is logged into diagLog and fails silent to "no update", and
+        // nothing here can block startup (ruling). The document feeds
+        // HomeViewModel.onVersionCheck, which raises the dismissible prompt only when
+        // minApkVersionCode > current.
+        val updateInfo = mutableStateOf<RemoteVersionInfo?>(null)
+        val updateChecker = UpdateChecker(
+            log = { message ->
+                diagLog.w("update", message)
+                Log.i(TAG, "update> $message")
+            },
+        )
+        Thread(
+            {
+                val info = updateChecker.check(UPDATE_MIRRORS)
+                if (info != null) {
+                    diagLog.w(
+                        "update",
+                        "version document: minApkVersionCode=${info.minApkVersionCode} " +
+                            "configVersion=${info.configVersion} " +
+                            "protocolParamsVersion=${info.protocolParamsVersion}",
+                    )
+                }
+                updateInfo.value = info
+            },
+            "update-check",
+        ).apply { isDaemon = true }.start()
+
+        // Diagnostic export target: app-specific external files (user-reachable path shown
+        // on screen), internal app-specific files as the fallback.
+        val diagOutDir = (getExternalFilesDir(null) ?: filesDir).toPath()
+        val currentVersionCode = packageManager.getPackageInfo(packageName, 0).let { info ->
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                info.longVersionCode.toInt()
+            } else {
+                @Suppress("DEPRECATION")
+                info.versionCode
+            }
+        }
+
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    val existing = restored
-                    if (existing != null) {
-                        LoggedInScreen(existing)
-                    } else {
-                        LoginScreen(vm) { token ->
+                    var tokenState by remember { mutableStateOf(restored) }
+                    var route by remember { mutableStateOf(Route.HOME) }
+                    val token = tokenState
+                    if (token == null) {
+                        LoginScreen(vm) { newToken ->
                             // Login success: persist the session and pin the device-identity
                             // snapshot so later hint changes cannot churn the DeviceId header.
-                            // LoginScreen shows the logged-in placeholder from its own state.
-                            session.save(token)
+                            session.save(newToken)
                             tokenStore.saveDeviceIdentity(identity)
+                            tokenState = newToken
+                        }
+                    } else {
+                        // Per-session VMs: Home loads rules/progress, Run owns the one-shot
+                        // pipeline (both over the same ApiClient built above).
+                        val homeVm = remember(token) {
+                            HomeViewModel(CoreHomeData(api), token, currentVersionCode)
+                        }
+                        val runVm = remember(token) {
+                            RunViewModel(
+                                stages = CoreRunStages(api, paramsStore.current()),
+                                token = token,
+                                log = { line ->
+                                    diagLog.w("run", line)
+                                    Log.i(TAG, "run> $line")
+                                },
+                            )
+                        }
+                        LaunchedEffect(updateInfo.value) {
+                            updateInfo.value?.let(homeVm::onVersionCheck)
+                        }
+                        when (route) {
+                            Route.HOME -> HomeScreen(
+                                vm = homeVm,
+                                onRunClick = { route = Route.RUN },
+                                onDiagnosticsClick = { route = Route.DIAGNOSTICS },
+                            )
+
+                            Route.RUN -> RunScreen(vm = runVm) { route = Route.HOME }
+
+                            Route.DIAGNOSTICS -> DiagnosticsScreen(
+                                outDir = diagOutDir,
+                                log = diagLog,
+                                configVersion = paramsStore.current().versionTag,
+                                onBack = { route = Route.HOME },
+                            )
                         }
                     }
                 }
@@ -172,6 +268,30 @@ class MainActivity : ComponentActivity() {
         private const val MAX_LOGGED_BODY_BYTES = 4096L
 
         /**
+         * Startup `version.json` mirror roots (spec C5 / R5): **jsDelivr over GitHub is the
+         * production default** (国内可达; raw.githubusercontent is unstable on the mainland),
+         * with raw GitHub as the ordered fallback — `UpdateChecker` tries them in order and
+         * every failure fails silent to "no update" (logged into the diagnostics log only).
+         *
+         * `OWNER/REPO` are placeholders until the public repo exists — the committed
+         * `config/version.json` sample uses the same placeholder — so today every check
+         * 404s into `null`; publishing the repo means replacing exactly this one constant.
+         *
+         * **Remote params document decision (T10 handoff / ruling 3): deferred.** No
+         * `config/params.json` exists on any mirror yet, and [ApiClient] snapshots its
+         * `ProtocolParams` at construction — an `applyRemote` after startup would be inert
+         * for this process *and* non-persistent (T10: only install keys persist), so
+         * wiring it now would be a no-op. When the doc lands, fetch it from these same
+         * mirror roots and call [ParamsStore.applyRemote] *before* building [ApiClient]
+         * (time-boxed), or teach [ApiClient] to read params lazily. The seam is ready;
+         * nothing else in this task changes.
+         */
+        private val UPDATE_MIRRORS = listOf(
+            "https://cdn.jsdelivr.net/gh/OWNER/REPO@main",
+            "https://raw.githubusercontent.com/OWNER/REPO/main",
+        )
+
+        /**
          * Production wire parameters (upstream `core/config.py`): endpoint, RSA public
          * key, sign salt; `aesKey`/`kdfSalt` are the bundled fallback only — [ParamsStore]
          * overlays per-install random keys (T5 ruling), same forced-determinism note as
@@ -206,3 +326,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 }
+
+/** Single-activity navigation (brief Step 3): the logged-in screens hosted by MainActivity. */
+private enum class Route { HOME, RUN, DIAGNOSTICS }
