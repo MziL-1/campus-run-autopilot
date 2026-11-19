@@ -140,6 +140,67 @@ class ValidatorTest {
     }
 
     @Test
+    fun `track above the per-run ceiling rejected`() {
+        // dayGoal 2000 m + the accepted 30 m slack; this track is synthesized with the cap
+        // lifted (exactly what both shells do for synthesis) but validated against the real
+        // policy, so an over-long request is refused here instead of silently accepted.
+        val capped = policy().copy(maxDistancePerRunM = 2000)
+        val tooFar = TrackSynthesizer.synthesize(
+            capped.copy(maxDistancePerRunM = 0),
+            targetDistanceM = 2100,
+            durationSec = 740,
+            seed = 7L,
+        )
+
+        val violations = RunPolicyValidator.validate(tooFar, capped, nowNoon)
+
+        assertKeyword(violations, "距离超限")
+        assertTrue(
+            violations.none { it.contains("距离不足") },
+            "the floor must stay satisfied so only the ceiling fires: $violations",
+        )
+    }
+
+    @Test
+    fun `per-run ceiling tolerates the accepted +30 m slack`() {
+        // The 11-17/11-19 live runs submitted 2030 m against a 2000 m dayGoal and were
+        // accepted as valid — that exact overshoot must keep passing the gate.
+        val capped = policy().copy(maxDistancePerRunM = 2000)
+        val track = TrackSynthesizer.synthesize(
+            capped.copy(maxDistancePerRunM = 0),
+            targetDistanceM = 2030,
+            durationSec = 760,
+            seed = 7L,
+        )
+
+        val violations = RunPolicyValidator.validate(track, capped, nowNoon)
+
+        assertEquals(
+            emptyList<String>(),
+            violations,
+            "2030 m against a 2000 m cap is the accepted live behaviour and must pass",
+        )
+    }
+
+    @Test
+    fun `zero ceiling means not advertised and is skipped`() {
+        // maxDistancePerRunM == 0 is the "not advertised" sentinel: no ceiling at all.
+        val uncapped = policy().copy(maxDistancePerRunM = 0)
+        val long = TrackSynthesizer.synthesize(
+            uncapped,
+            targetDistanceM = 3000,
+            durationSec = 1000,
+            seed = 7L,
+        )
+
+        assertEquals(
+            emptyList<String>(),
+            RunPolicyValidator.validate(long, uncapped, nowNoon),
+            "an unadvertised cap must not invent a ceiling",
+        )
+    }
+
+    @Test
     fun `school floor above settlement floor is enforced`() {
         val violations = RunPolicyValidator.validate(cleanTrack, policy().copy(minDistancePerRunM = 2500), nowNoon)
 

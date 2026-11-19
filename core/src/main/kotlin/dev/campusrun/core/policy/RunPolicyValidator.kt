@@ -26,16 +26,22 @@ import kotlin.math.roundToInt
  *    floor (`Settlement` sends upstream builder's `selDistance = 2000`; anything shorter
  *    goes out as `complete=false, unCompleteReason=10` and reads back invalid — T8
  *    calibration ruling). A school floor above 2000 (e.g. `minDistance = 3000`) wins.
- * 4. **配速越界** — mean pace `durationSec * 1000 / distanceM` must sit inside the
+ * 4. **距离超限** — the emitted path length must stay within the per-run ceiling
+ *    `maxDistancePerRunM` (+ [MAX_DISTANCE_SLACK_M] = 30 m of tolerance, the accepted
+ *    2030-vs-2000 slack from the 11-17/11-19 live runs, spec C2 单次距离限值).
+ *    `maxDistancePerRunM == 0` means "not advertised" → no ceiling. Both shells lift a
+ *    sub-target cap to 0 for *synthesis* only, so a too-long request still reaches this
+ *    check and is refused here instead of being silently accepted.
+ * 5. **配速越界** — mean pace `durationSec * 1000 / distanceM` must sit inside the
  *    advertised `[paceMinSecPerKm, paceMaxSecPerKm]` window (`speedTop`/`speedBottom`,
  *    seconds per km; `speedTop` is the FAST bound, hence the smaller number). Skipped
  *    when the window is not advertised (both 0).
- * 5. **时段外** — the submission instant (epoch ms, caller applies the server clock
+ * 6. **时段外** — the submission instant (epoch ms, caller applies the server clock
  *    skew) must fall inside the school's `validTime` window, read on the rule's own
  *    timezone ([RULE_ZONE], the platform runs Chinese campuses; school hours are wall
  *    clock there). Both bounds 0 = not advertised = no check; `from > to` is treated as
  *    an overnight window. `from` inclusive, `to` exclusive.
- * 6. **人脸窗口内** (spec R6) — when a [RunPolicy.faceWindow] is present, the instant
+ * 7. **人脸窗口内** (spec R6) — when a [RunPolicy.faceWindow] is present, the instant
  *    must be outside it. 7.4.x never advertises a window (ruling: `faceWindow` stays
  *    null), so production skips this; the rule exists for synthetic/future policies.
  *
@@ -47,9 +53,10 @@ import kotlin.math.roundToInt
  *
  * Deliberately NOT gated here (documented scope): step rate (`TrackPoint.stepRateHz`
  * holds steps-per-MINUTE per Task 7 semantics — spec C2's 70–240 band is enforced by
- * the synthesizer, and no server-side step rule is advertised), the `dayGoal` ceiling
- * (a *daily* total, enforced at synthesis time, not per submission), and anything the
- * caller cannot know offline (today's kilometer total, official-App state).
+ * the synthesizer, and no server-side step rule is advertised), the *cumulative* daily
+ * total (today's kilometer sum, official-App state — anything the caller cannot know
+ * offline; the cross-session 每日 ≤1 rule is gated separately from history in
+ * `dailySelfLimitRefusal`, upload package).
  */
 object RunPolicyValidator {
 
@@ -62,6 +69,13 @@ object RunPolicyValidator {
 
     /** Upstream builder `selDistance` default — the settlement completeness floor. */
     private const val SETTLEMENT_MIN_DISTANCE_M = 2000
+
+    /**
+     * Tolerance on the per-run ceiling, in metres: the 11-17/11-19 live runs submitted
+     * 2030 m against a 2000 m `dayGoal` and the server accepted both as valid, so the
+     * gate allows exactly that much overshoot (spec C2 单次距离限值; acceptance §2-3).
+     */
+    const val MAX_DISTANCE_SLACK_M = 30
 
     /**
      * School `validTime` is wall-clock local time of the Chinese campus platform. Also the
@@ -96,6 +110,11 @@ object RunPolicyValidator {
             val floorM = maxOf(policy.minDistancePerRunM, SETTLEMENT_MIN_DISTANCE_M)
             if (distanceM < floorM) {
                 violations += "距离不足: 轨迹 ${distanceM.roundToInt()}m 低于单次最低 ${floorM}m"
+            }
+            val ceilingM = policy.maxDistancePerRunM
+            if (ceilingM > 0 && distanceM > ceilingM + MAX_DISTANCE_SLACK_M) {
+                violations += "距离超限: 轨迹 ${distanceM.roundToInt()}m 超过单次上限 ${ceilingM}m " +
+                    "(+${MAX_DISTANCE_SLACK_M}m 容差)"
             }
             if (policy.paceMinSecPerKm > 0 && policy.paceMaxSecPerKm > 0 && distanceM > 0) {
                 val durationSec = track.last().elapsedSec - track.first().elapsedSec
