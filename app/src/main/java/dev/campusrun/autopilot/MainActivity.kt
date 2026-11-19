@@ -24,6 +24,12 @@ import dev.campusrun.core.config.ProtocolParams
 import dev.campusrun.core.identity.DeviceIdentity
 import dev.campusrun.core.session.SessionManager
 import dev.campusrun.core.session.Token
+import okhttp3.Call
+import okhttp3.Connection
+import okhttp3.EventListener
+import okhttp3.OkHttpClient
+import okhttp3.Response
+import java.net.InetAddress
 
 /**
  * Wiring host for Task 12: builds the object graph (encrypted stores → params →
@@ -34,6 +40,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Debug builds only: chrome://inspect access to the captcha WebView (T12 diagnosis).
+        if (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+            android.webkit.WebView.setWebContentsDebuggingEnabled(true)
+        }
 
         // Encrypted per-install stores (spec C7): session + device identity + wire keys.
         val tokenStore = AndroidTokenStore(this)
@@ -48,9 +58,48 @@ class MainActivity : ComponentActivity() {
         )
         val deviceModel = asciiHeader(Build.MODEL, "Android Device")
         val osVersion = asciiHeader(Build.VERSION.RELEASE, "13")
+        // Diagnostics seam (T12 device run): status line only — method/path/code/content-
+        // type/body-length. Never headers or bodies (Authorization, phone, token).
+        val eventListener = object : EventListener() {
+            override fun dnsEnd(call: Call, domainName: String, inetAddresses: List<InetAddress>) {
+                Log.i(TAG, "dns $domainName -> ${inetAddresses.joinToString { it.hostAddress ?: "?" }}")
+            }
+
+            override fun connectionAcquired(call: Call, connection: Connection) {
+                Log.i(TAG, "conn ${connection.socket().inetAddress?.hostAddress} proto=${connection.protocol()}")
+            }
+
+            override fun responseHeadersEnd(call: Call, response: Response) {
+                Log.i(
+                    TAG,
+                    "resp ${response.code} proto=${response.protocol} " +
+                        "tls=${response.handshake?.tlsVersion} ${response.handshake?.cipherSuite} " +
+                        "${call.request().url.encodedPath}",
+                )
+            }
+        }
+        val httpClient = OkHttpClient.Builder()
+            .eventListener(eventListener)
+            .addInterceptor { chain ->
+                val request = chain.request()
+                Log.i(TAG, "net> ${request.method} ${request.url.encodedPath}")
+                val response = chain.proceed(request)
+                val peer = chain.connection()?.socket()?.inetAddress?.hostAddress ?: "?"
+                // peekBody is non-consuming; length only, never the content.
+                val len = runCatching { response.peekBody(MAX_LOGGED_BODY_BYTES).string().length }
+                    .getOrDefault(-1)
+                Log.i(
+                    TAG,
+                    "net< ${response.code} ${request.url.encodedPath} peer=$peer " +
+                        "proto=${chain.connection()?.protocol()} type=${response.header("Content-Type")} peekLen=$len",
+                )
+                response
+            }
+            .build()
         val api = ApiClient(
             params = paramsStore.current(),
             deviceHeaders = deviceHeaders(identity.stableId, deviceModel, osVersion),
+            client = httpClient,
         )
 
         // Cold start: restore applies the persisted token to [api] (or null → login UI).
@@ -120,6 +169,7 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         private const val TAG = "CampusRun"
+        private const val MAX_LOGGED_BODY_BYTES = 4096L
 
         /**
          * Production wire parameters (upstream `core/config.py`): endpoint, RSA public

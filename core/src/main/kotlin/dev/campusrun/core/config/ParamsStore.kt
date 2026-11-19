@@ -51,18 +51,23 @@ class FileParamsKeyStore(private val file: File) : ParamsKeyStore {
  *
  * 1. **Per-install random keys.** First [current] call generates a fresh random
  *    `aesKey` (AES-128, 16 bytes — same length as `productionParams()`) and `kdfSalt`
- *    (40 bytes = four upstream 10-byte `keyData` segments) via [SecureRandom], persisted
- *    through the [ParamsKeyStore] seam, and reloaded by every later store sharing that
- *    seam (deterministic per persistence). Rationale: upstream generates these per
- *    request anyway (`NetSecClient.encrypt_request`), so any valid-length key is
- *    wire-compatible, while one pinned key shared by all installs would correlate every
- *    request (T3 watch item). When persistence is unavailable, the bundled values remain
- *    the fallback — a fresh install always gets working params. Both failure paths are
- *    written to [log] (injectable, stderr by default — same seam pattern as
- *    [UpdateChecker]) so an install stuck on the shared bundled pin is diagnosable
- *    instead of silently correlated; the resolved decision is memoised for process
- *    stability (a mid-run key switch would churn keys within one run), so recovery means
- *    a new store instance, not a live retry.
+ *    (40 bytes = four upstream 10-byte `keyData` segments), persisted through the
+ *    [ParamsKeyStore] seam, and reloaded by every later store sharing that seam
+ *    (deterministic per persistence). **The bytes are ASCII hex characters** — T12 live
+ *    finding (2026-11-18, real gateway + device): binary (SecureRandom raw-byte) install
+ *    keys make the gateway answer `200` with an **empty body** (aesKey) or a garbled body
+ *    (kdfSalt), while same-length ASCII-hex random keys are accepted — i.e. "any
+ *    valid-length key" was only true within the printable-ASCII domain, so generation and
+ *    persisted-blob validation stay inside `[0-9a-f]`. Per-install uniqueness (no shared
+ *    cross-install pin, T3/T5 correlation watch) is preserved. When persistence is
+ *    unavailable, the bundled values remain the fallback — a fresh install always gets
+ *    working params. Both failure paths are written to [log] (injectable, stderr by
+ *    default — same seam pattern as [UpdateChecker]) so an install stuck on the shared
+ *    bundled pin is diagnosable instead of silently correlated; the resolved decision is
+ *    memoised for process stability (a mid-run key switch would churn keys within one
+ *    run), so recovery means a new store instance, not a live retry. A persisted blob
+ *    with non-ASCII bytes (written by a pre-T12 build) is treated like a fresh install:
+ *    regenerated, re-saved, and logged.
  * 2. **Remote config never ships keys.** [applyRemote] parses a remote params document
  *    that deliberately has *no* `aesKey`/`kdfSalt` fields: unknown keys are ignored
  *    whatever shape they arrive in, so the merge — restricted to hot-updatable non-key
@@ -136,11 +141,19 @@ class ParamsStore(
             log("params: key store load failed, treating as a fresh install: $e")
             null
         }
-        if (persisted != null && persisted.size == BLOB_BYTES) {
+        if (persisted != null && isWireCompatible(persisted)) {
             return persisted.copyOfRange(0, AES_KEY_BYTES) to persisted.copyOfRange(AES_KEY_BYTES, BLOB_BYTES)
         }
-        // Fresh install (or unreadable blob): generate once, then try to persist.
-        val fresh = ByteArray(BLOB_BYTES).also { SECURE_RANDOM.nextBytes(it) }
+        if (persisted != null) {
+            // T12 migration: a pre-T12 build persisted raw SecureRandom bytes; the gateway
+            // answers those with an empty/garbled body. Regenerate inside the ASCII domain.
+            log("params: persisted install keys contain non-ASCII bytes (gateway rejects them, T12 finding) — regenerating")
+        }
+        // Fresh install (or unreadable/non-ASCII blob): generate once, then try to persist.
+        val fresh = ByteArray(BLOB_BYTES)
+        // ASCII hex: 8 random bytes -> 16 hex chars (aesKey), 20 -> 40 (kdfSalt).
+        hexEncode(randomBytes(AES_KEY_BYTES / 2), fresh, 0)
+        hexEncode(randomBytes(KDF_SALT_BYTES / 2), fresh, AES_KEY_BYTES)
         val saved = try {
             keyStore.save(fresh)
             true
@@ -155,6 +168,22 @@ class ParamsStore(
         } else {
             // Persistence unavailable -> bundled fallback; first run must not brick the install.
             bundled.aesKey to bundled.kdfSalt
+        }
+    }
+
+    /** `aesKey || kdfSalt` is usable as-is only at 56 bytes and entirely printable ASCII. */
+    private fun isWireCompatible(blob: ByteArray): Boolean =
+        blob.size == BLOB_BYTES && blob.all { it in 0x20..0x7E }
+
+    private fun randomBytes(n: Int): ByteArray = ByteArray(n).also { SECURE_RANDOM.nextBytes(it) }
+
+    /** Lower-case hex of [raw] into [out] at [offset] (no HexFormat: needs API 34 on Android). */
+    private fun hexEncode(raw: ByteArray, out: ByteArray, offset: Int) {
+        val digits = HEX_DIGITS
+        for (i in raw.indices) {
+            val b = raw[i].toInt()
+            out[offset + i * 2] = digits[b shr 4 and 0xF].code.toByte()
+            out[offset + i * 2 + 1] = digits[b and 0xF].code.toByte()
         }
     }
 
@@ -176,6 +205,8 @@ class ParamsStore(
         const val AES_KEY_BYTES = 16
         const val KDF_SALT_BYTES = 40
         const val BLOB_BYTES = AES_KEY_BYTES + KDF_SALT_BYTES
+
+        const val HEX_DIGITS = "0123456789abcdef"
 
         val SECURE_RANDOM = SecureRandom()
 

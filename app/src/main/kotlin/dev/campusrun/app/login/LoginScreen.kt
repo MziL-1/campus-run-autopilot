@@ -1,8 +1,14 @@
 package dev.campusrun.app.login
 
 import android.webkit.JavascriptInterface
+import android.webkit.ConsoleMessage
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.util.Log
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,6 +17,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -29,7 +36,10 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.ImeAction
+import androidx.webkit.WebViewAssetLoader
 import dev.campusrun.core.session.Token
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -109,7 +119,15 @@ private fun CredentialForm(vm: LoginViewModel) {
             singleLine = true,
             enabled = !busy,
             visualTransformation = PasswordVisualTransformation(),
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+            keyboardOptions = KeyboardOptions(
+                keyboardType = KeyboardType.Password,
+                // Device-run finding (T12): a third-party IME can cover the 登录
+                // button, so submit straight from the keyboard's Go action.
+                imeAction = ImeAction.Go,
+            ),
+            keyboardActions = KeyboardActions(
+                onGo = { vm.submit(phone.trim(), password) },
+            ),
             modifier = Modifier.fillMaxWidth(),
         )
         Spacer(Modifier.height(24.dp))
@@ -152,19 +170,78 @@ private fun CaptchaChallenge(
     onCancel: () -> Unit,
     onError: (String) -> Unit,
 ) {
-    Box(Modifier.fillMaxSize()) {
+    Box(Modifier.fillMaxSize().statusBarsPadding()) {
         AndroidView(
             factory = { context ->
+                // T12 device-run finding (spike §3 risk #1, resolved): gt4.js builds its
+                // core-bundle URLs protocol-relative (`//gcaptcha4.geetest.com/...`), so a
+                // `file://` page resolves them to `file://gcaptcha4...` (ERR_INVALID_URL)
+                // and script loads are CORS-blocked outright. The page must live on an
+                // https origin — WebViewAssetLoader serves the bundled assets under
+                // https://appassets.androidplatform.net/ (never touches the network), and
+                // protocol-relative URLs then resolve to https://gcaptcha4.geetest.com.
+                // This is the spike's documented fallback for the file:// risk.
+                val assetLoader = WebViewAssetLoader.Builder()
+                    .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(context))
+                    .build()
                 WebView(context).apply {
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
-                    settings.allowFileAccess = true
-                    // file:// page → GeeTest API XHR; the official SDK loads its local
-                    // bridge page the same way, and gt4 endpoints send CORS `*`.
-                    @Suppress("DEPRECATION")
-                    settings.allowUniversalAccessFromFileURLs = true
-                    webViewClient = WebViewClient()
-                    addJavascriptInterface(Gt4Bridge(onSolved, onCancel, onError), "JSInterface")
+                    // T12 device-run diagnostics: which resource fails and what the page
+                    // logs — the bare WebViewClient() above swallowed all of it.
+                    webViewClient = object : WebViewClient() {
+                        override fun shouldInterceptRequest(
+                            view: WebView,
+                            request: WebResourceRequest,
+                        ): WebResourceResponse? = assetLoader.shouldInterceptRequest(request.url)
+
+                        override fun onReceivedError(
+                            view: WebView,
+                            request: WebResourceRequest,
+                            error: WebResourceError,
+                        ) {
+                            Log.e("gt4", "net-error ${request.url} :: ${error.errorCode} ${error.description}")
+                        }
+
+                        override fun onReceivedHttpError(
+                            view: WebView,
+                            request: WebResourceRequest,
+                            response: WebResourceResponse,
+                        ) {
+                            Log.e("gt4", "http-error ${request.url} :: ${response.statusCode}")
+                        }
+
+                        @Deprecated("Deprecated in Java")
+                        override fun onLoadResource(view: WebView, url: String) {
+                            Log.i("gt4", "load $url")
+                        }
+
+                        override fun onPageFinished(view: WebView, url: String) {
+                            Log.i("gt4", "page-finished $url")
+                        }
+                    }
+                    webChromeClient = object : WebChromeClient() {
+                        override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
+                            Log.i(
+                                "gt4",
+                                "console[${consoleMessage.messageLevel()}] ${consoleMessage.message()} " +
+                                    "@${consoleMessage.sourceId()}:${consoleMessage.lineNumber()}",
+                            )
+                            return true
+                        }
+                    }
+                    addJavascriptInterface(
+                        Gt4Bridge(
+                            onSolved = onSolved,
+                            onCancel = onCancel,
+                            onError = onError,
+                            // T12 device fix: the official page hides `.geetest_captcha`
+                            // until the host reveals it (CDP-proven); `gt4Notify` runs on
+                            // the JS bridge thread, so hop to the WebView's own thread.
+                            onReady = { post { evaluateJavascript(SHOW_BOX_JS, null) } },
+                        ),
+                        "JSInterface",
+                    )
                     loadUrl(captchaAssetUrl())
                 }
             },
@@ -181,10 +258,12 @@ private fun CaptchaChallenge(
 }
 
 /**
- * `file:///android_asset/geetest/gt4-index.html?params=<urlencoded json>` — the page
- * parses the query with `decodeURIComponent(query.split('=')[1])`, so the value must be
- * URL-encoded and free of raw `=` (URLEncoder guarantees both; compact JSON has no
- * spaces, so no `+`-vs-`%20` mismatch either).
+ * `https://appassets.androidplatform.net/assets/geetest/gt4-index.html?params=<urlencoded json>` —
+ * served locally by [WebViewAssetLoader] (no network), and the https origin makes gt4.js's
+ * protocol-relative API URLs resolve correctly. The page parses the query with
+ * `decodeURIComponent(query.split('=')[1])`, so the value must be URL-encoded and free of
+ * raw `=` (URLEncoder guarantees both; compact JSON has no spaces, so no `+`-vs-`%20`
+ * mismatch either).
  */
 private fun captchaAssetUrl(): String {
     val args = buildJsonObject {
@@ -194,14 +273,23 @@ private fun captchaAssetUrl(): String {
         put("title", "完成安全验证")
     }.toString()
     val encoded = URLEncoder.encode(args, Charsets.UTF_8.name()).replace("+", "%20")
-    return "file:///android_asset/geetest/gt4-index.html?params=$encoded"
+    return "https://appassets.androidplatform.net/assets/geetest/gt4-index.html?params=$encoded"
 }
 
+/**
+ * Reveals the challenge card. CDP on the real device proved the official page keeps
+ * `.geetest_captcha` at `display:none` until the host calls `showBox` (the official
+ * SDK does this natively; we must do it from the WebView side). `captchaObj` is
+ * assigned before `ready` is emitted, so the call is safe at that point.
+ */
+private const val SHOW_BOX_JS = "window.jsBridge && window.jsBridge.callback('showBox')"
+
 /** Receives `JSInterface.gt4Notify(json)` callbacks from the gt4 bridge page. */
-private class Gt4Bridge(
+internal class Gt4Bridge(
     private val onSolved: (CaptchaResult) -> Unit,
     private val onCancel: () -> Unit,
     private val onError: (String) -> Unit,
+    private val onReady: () -> Unit = {},
 ) {
 
     @JavascriptInterface
@@ -209,22 +297,29 @@ private class Gt4Bridge(
         // Runs on the WebView's JS thread; the targets are thread-safe (the ViewModel
         // handshake is synchronised, and `close`/`error` only release a latch).
         val event = runCatching { JSONObject(message) }.getOrNull() ?: return
-        when (event.optString("type")) {
+        Log.i("gt4", "notify type=${event.optString("type")}")
+        handleEvent(event.optString("type"), event.optJSONObject("data"))
+    }
+
+    /** Dispatch on an already-parsed notify — the unit-testable seam (Gt4BridgeTest). */
+    internal fun handleEvent(type: String, data: JSONObject?) {
+        when (type) {
             "result" -> {
-                val data = event.optJSONObject("data") ?: return
+                val payload = data ?: return
                 onSolved(
                     CaptchaResult(
-                        lotNumber = data.optString("lot_number"),
-                        passToken = data.optString("pass_token"),
-                        genTime = data.optString("gen_time"),
-                        captchaOutput = data.optString("captcha_output"),
+                        lotNumber = payload.optString("lot_number"),
+                        passToken = payload.optString("pass_token"),
+                        genTime = payload.optString("gen_time"),
+                        captchaOutput = payload.optString("captcha_output"),
                     ),
                 )
             }
 
+            "ready" -> onReady()
             "close" -> onCancel()
-            "error", "fail" -> onError("验证失败: ${event.optJSONObject("data")?.optString("msg") ?: "请重试"}")
-            // "ready" and "get" (GeeToken) need no reaction — see spike doc §3/B4.
+            "error", "fail" -> onError("验证失败: ${data?.optString("msg") ?: "请重试"}")
+            // "get" (GeeToken) needs no reaction — see spike doc §3/B4.
         }
     }
 }

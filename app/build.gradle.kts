@@ -42,6 +42,7 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.security.crypto)
+    implementation(libs.androidx.webkit)
     implementation(libs.kotlinx.serialization.json)
     // ApiClient's default OkHttpClient constructor argument appears on our call sites,
     // so the type must be on the app classpath even though app code never names it.

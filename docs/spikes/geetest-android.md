@@ -88,7 +88,52 @@ geevalidate(error==10000) ──► login(Basic) ► Token
 
 ## 5. 真机验证：测试账号登录拿到 Token
 
-（Step 1 硬门槛 —— 实施完成后回填：安装、登录、杀进程重开的 adb 命令与输出、截图。）
+**结论：硬门槛通过 —— 真机 `9c76d417` 用测试账号走完 checkGeeUse → gt4 滑块 → geevalidate → login，拿到真实 Token（uid=10549846, unid=35102），杀进程重开后登录态保持。** 2026-11-19 上午实测，APK 与本仓库提交代码一致。
+
+### 5.1 设备链路（adb 命令与关键输出，凭据仅 inline env 注入、不落任何文件）
+
+| 步骤 | 命令 | 结果 |
+|---|---|---|
+| 安装 | `adb -s 9c76d417 install -r app\build\outputs\apk\debug\app-debug.apk` | `Success` |
+| 启动 | `adb shell am start -n dev.campusrun.autopilot/.MainActivity` | `Starting: Intent … MainActivity` |
+| 填表 | `adb shell input tap <字段中心>` + `adb shell input text $env:CAMPUS_*`（凭据仅当次进程 env） | 手机号/密码两字段填充；**软键盘会盖住登录按钮** → `input keyevent KEYCODE_BACK` 收起后 `uiautomator dump` 读按钮 bounds 再点其**中心**（盲点固定坐标会点到 IME） |
+| 登录 | `adb shell input tap 632 1794`（bounds 中心） | 状态机 → `NeedCaptcha`，WebView 加载 gt4 |
+
+### 5.2 滑块求解（关键修复与自动化）
+
+- **showBox 修复生效（本次第一修复）**：`gt4-index.html` 顶层 `.geetest_captcha` 恒 `display:none`，官方 SDK 由原生侧触发显示；`Gt4Bridge` 收到 `ready` → `evaluateJavascript("window.jsBridge && window.jsBridge.callback('showBox')")`（须 `post` 回 WebView 线程）。实测：`notify type=ready` 后卡片（301×343 CSS px 蓝顶条 + 拼图 + 滑块）**立即可见**，此前"只见标题下方全白"消失。单测 `Gt4BridgeTest` 钉住该分发（ready→reveal、get→无动作、close→取消、error→可读）。
+- **求解脚本**（仓库外临时工具，凭据不相关）：`%LOCALAPPDATA%\Temp\opencode\t12solve.py` —— `adb forward tcp:9222` + Playwright CDP 连 WebView，页面内 canvas 边缘匹配（上游 `geetest_solver.js` 同款算法：bg 梯度边缘图 × slice alpha 边界点扫描，`Access-Control-Allow-Origin: *` 实测确认可 `getImageData`），得 `targetDist=185.24 CSS px (rawDist=208, bestScore=79, scale=0.891)`；按钮行程比 `BTN_TRACK=1.0022` → `BTN_DIST=184.33`；随后 **CDP `Input.dispatchTouchEvent` 按上游 human_track（48–65 点、0.85–1.25s、sigmoid 速度+弧形漂移）拖动滑块**，`touchEnd` 后轮询 `captchaObj.getValidate()` 命中。
+- 实测 logcat 链（单次尝试即通过，无失败重试）：
+
+```
+09:55:23.254 I gt4 : notify type=result
+09:55:23.268 I CampusRun: net> POST /api/v70270/security/geevalidate
+09:55:23.415 I CampusRun: net< 200 … type=application/json peekLen=347
+09:55:23.432 I CampusRun: net> POST /api/v70100/login
+09:55:24.678 I CampusRun: net< 200 … type=application/json peekLen=2179
+```
+
+- UI 终态：`登录成功 / uid=10549846  unid=35102 / 会话已加密保存在本机`（截图存于本机 `%TEMP%\t12-loggedin.png`，未入库；凭据与四元组不落报告）。
+
+### 5.3 杀进程重开（token 持久化，spec C7）
+
+```
+$ adb -s 9c76d417 shell am force-stop dev.campusrun.autopilot
+$ adb -s 9c76d417 shell pidof dev.campusrun.autopilot      # (空 — 进程已死)
+$ adb -s 9c76d417 shell am start -n dev.campusrun.autopilot/.MainActivity
+Starting: Intent { cmp=dev.campusrun.autopilot/.MainActivity }
+$ adb shell uiautomator dump … 解析 text=
+登录成功 / uid=10549846  unid=35102 / 会话已加密保存在本机
+```
+
+- 佐证：`run-as dev.campusrun.autopilot ls shared_prefs/` → `campusrun_secure.xml`（09:55 登录时写入，EncryptedSharedPreferences AES256-SIV/GCM）在 force-stop 后仍在；**再次 `install -r` 覆盖安装后登录态依旧保持**（第三重证明）。`campusrun_params.xml` 为安装期密钥 blob，与会话分离（logout 不可触碰）。
+
+### 5.4 观察与已知边界
+
+- `favicon.ico` 解析失败（`ERR_NAME_NOT_RESOLVED`）为无害噪声，不阻断。
+- 120s captcha 窗口内必须完成"填表→提交→求解→拖动"；首轮因软键盘遮挡浪费窗口超时一次（`人机校验超时（120s 未完成）`，状态机正确回落 Error 可重试），修正点按序列后单次通过。
+- 设备为 AOD/熄屏时 `screencap` 只得到近黑帧（状态栏在、内容黑）——先 `input keyevent KEYCODE_WAKEUP` + `wm dismiss-keyguard` + `svc power stayon usb` 再截图。
+- `checkGeeUse`/`geevalidate` 响应 `peekLen=347`（JSON 非空）—— 早前"200 空 body"根因（ParamsStore 非 ASCII 密钥）修复的持续验证。
 
 ## 6. 局限与后续
 

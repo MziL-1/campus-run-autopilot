@@ -71,6 +71,37 @@ class ParamsStoreTest {
     }
 
     @Test
+    fun `install keys are printable ASCII hex - the gateway rejects non-ASCII keys (T12 live finding)`() {
+        val store = ParamsStore(bundled, FileParamsKeyStore(File(tempDir, "ascii.bin")))
+
+        val params = store.current()
+
+        val hexDomain = { b: Byte -> b in 0x30..0x39 || b in 0x61..0x66 }
+        assertTrue(params.aesKey.all(hexDomain), "aesKey must stay in [0-9a-f]: ${params.aesKey.decodeToString()}")
+        assertTrue(params.kdfSalt.all(hexDomain), "kdfSalt must stay in [0-9a-f]: ${params.kdfSalt.decodeToString()}")
+        assertEquals(16, params.aesKey.size)
+        assertEquals(40, params.kdfSalt.size)
+    }
+
+    @Test
+    fun `persisted binary keys from a pre-T12 build are regenerated as ASCII and re-saved`() {
+        val file = File(tempDir, "legacy.bin")
+        file.writeBytes(ByteArray(56) { 1 }) // right size, every byte non-ASCII
+        val logs = mutableListOf<String>()
+
+        val params = ParamsStore(bundled, FileParamsKeyStore(file), log = logs::add).current()
+
+        val hexDomain = { b: Byte -> b in 0x30..0x39 || b in 0x61..0x66 }
+        assertTrue(params.aesKey.all(hexDomain) && params.kdfSalt.all(hexDomain), "must not keep binary keys")
+        assertTrue(logs.any { it.contains("non-ASCII") }, "migration must be observable: $logs")
+
+        // The regenerated keys were re-saved: a fresh instance reloads them unchanged.
+        val second = ParamsStore(bundled, FileParamsKeyStore(file)).current()
+        assertArrayEquals(params.aesKey, second.aesKey)
+        assertArrayEquals(params.kdfSalt, second.kdfSalt)
+    }
+
+    @Test
     fun `remote params with higher version applied without restart`() {
         val store = ParamsStore(bundled, FileParamsKeyStore(File(tempDir, "keys.bin")))
         val before = store.current()
