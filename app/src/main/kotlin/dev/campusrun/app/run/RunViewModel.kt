@@ -21,6 +21,7 @@ import dev.campusrun.core.upload.RunRecord
 import dev.campusrun.core.upload.RunUploader
 import dev.campusrun.core.upload.Settlement
 import dev.campusrun.core.upload.UploadHandle
+import dev.campusrun.core.upload.dailySelfLimitRefusal
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -84,11 +85,13 @@ interface RunStages {
  *
  * - **rule body absent** (no pace window AND no time window) → refuse: outside the school
  *   run window or a rejected session, exactly upstream's "未取得学校规则，停止提交".
- * - **每日次数上限 advertised** → refuse: `HistoryClient.RunRecord` carries no date, so
- *   the App cannot count today's runs — an advertised limit must not read as "0 today"
- *   (the CLI's fail-closed `dailyLimitAdmission`, review round 1).
- * - **daily self-limit (spec §5.5-4)**: one submission per process/session; history has
- *   no date field, so cross-session daily gating is not derivable here (documented limit).
+ * - **每日次数上限 advertised** → refuse: `latest()` returns only the newest history row,
+ *   so today's run *count* (which an advertised limit needs) is not derivable here —
+ *   the CLI's fail-closed `dailyLimitAdmission` parity (review round 1).
+ * - **daily self-limit (spec §5.5-4)**: one submission per process/session, PLUS the
+ *   cross-session leg — before any upload the newest history record must not already be
+ *   today's ([dailySelfLimitRefusal]); a process restart can no longer re-enable a second
+ *   run of the same day. `null` history (no records) is the first-run case and proceeds.
  */
 class RunViewModel(
     private val stages: RunStages,
@@ -115,7 +118,7 @@ class RunViewModel(
     fun startRun(distanceM: Int, durationSec: Int) {
         if (state is RunState.Running) return
         if (submissionAttempted) {
-            fail("本次会话已提交过一次，按每日 1 次自限不再重复提交（历史记录无日期，无法跨会话核对）")
+            fail("本次会话已提交过一次，按每日 1 次自限不再重复提交（跨会话另有历史记录日期把关）")
             return
         }
         if (distanceM <= 0 || durationSec <= 0) {
@@ -149,11 +152,12 @@ class RunViewModel(
                 return
             }
 
-            // 每日次数上限 fail-closed admission: the App has no dated history to count from.
+            // 每日次数上限 fail-closed admission: latest() hands back only the newest row,
+            // so today's run COUNT (what an advertised limit needs) is not derivable here.
             if (policy.dailyRunLimit > 0) {
                 fail(
-                    "本校每日次数上限 ${policy.dailyRunLimit} 次，但历史记录无日期、无法核对今日次数 " +
-                        "— 已拒绝（fail-closed），请人工确认今日次数后再跑",
+                    "本校每日次数上限 ${policy.dailyRunLimit} 次，但历史接口只回传最新一条记录、" +
+                        "无法核对今日次数 — 已拒绝（fail-closed），请人工确认今日次数后再跑",
                 )
                 return
             }
@@ -211,6 +215,15 @@ class RunViewModel(
                 return
             }
             log("gate: passed (fence/checkpoints/pace/distance/window/face)")
+
+            // ── Cross-session 每日 ≤1 (spec §5.5-4 #1): the newest history record must not
+            // already be today's. Read-only, before any upload — a process restart can no
+            // longer re-enable a second run of the same day.
+            dailySelfLimitRefusal(stages.latestHistory(token), System.currentTimeMillis() + skewMs)
+                ?.let { message ->
+                    fail(message)
+                    return
+                }
 
             submissionAttempted = true
             val handle = stages.upload(token, track)

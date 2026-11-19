@@ -18,6 +18,8 @@ import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
@@ -238,6 +240,38 @@ class RunUploaderTest {
 
         assertEquals(RunRecord("7", 1234, false), client.latest(TOKEN))
         assertEquals(RunRecord("8", 100, true), client.latest(TOKEN))
+    }
+
+    @Test
+    fun `history latest parses startTime into the record for the daily gate`() {
+        // Three shapes seen/anticipated in the wild (history_dates.py): epoch ms, epoch s,
+        // and a yyyy-MM-dd date string; absent -> null, which the daily gate fails closed on.
+        server.enqueue(
+            MockResponse().setBody(
+                """{"error":10000,"data":[{"rrid":11,"totalDis":100,"isValid":true,"startTime":1795057647307}]}""",
+            ),
+        )
+        server.enqueue(
+            MockResponse().setBody(
+                """{"error":10000,"data":[{"rrid":12,"totalDis":100,"isValid":true,"startTime":1795057647}]}""",
+            ),
+        )
+        server.enqueue(
+            MockResponse().setBody(
+                """{"error":10000,"data":[{"rrid":13,"totalDis":100,"isValid":true,"startTime":"2026-11-19"}]}""",
+            ),
+        )
+        server.enqueue(
+            MockResponse().setBody(
+                """{"error":10000,"data":[{"rrid":14,"totalDis":100,"isValid":true}]}""",
+            ),
+        )
+        val client = HistoryClient(api())
+
+        assertEquals(1795057647307L, client.latest(TOKEN)?.startTimeMs, "epoch ms must pass through")
+        assertEquals(1795057647000L, client.latest(TOKEN)?.startTimeMs, "epoch seconds must be scaled to ms")
+        assertNotNull(client.latest(TOKEN)?.startTimeMs, "a yyyy-MM-dd string must be dated")
+        assertNull(client.latest(TOKEN)?.startTimeMs, "a row without startTime stays undated")
     }
 
     @Test

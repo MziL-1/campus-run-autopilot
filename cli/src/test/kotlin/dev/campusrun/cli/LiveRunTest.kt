@@ -22,10 +22,14 @@ import kotlin.random.Random
  * Risk control (spec §5.5, dispatch rulings): one short run just over the 2000 m
  * completeness floor (settlement sends `selDistance = 2000`; anything shorter reads
  * back `complete=false`), in-window (enforced by the policy gate — outside the school
- * window the rule body is absent and the run stops at the `policy` stage), daily ≤ 1
- * (operator pre-check: `HistoryClient.RunRecord` carries no date, so "already ran
- * today" is verified against the upstream history listing before invoking
- * `:cli:liveTest`, not inside this test).
+ * window the rule body is absent and the run stops at the `policy` stage), daily ≤ 1.
+ *
+ * The daily ≤ 1 rule no longer rests on an operator assertion: `executeRun` reads the
+ * newest history record immediately before uploading and refuses when it is already
+ * today's (`dailySelfLimitRefusal`), and this test additionally demands an explicit
+ * `CAMPUS_ALLOW_LIVE_SUBMIT=1` confirmation before it may spend the daily budget at all.
+ * `runsToday` is therefore left `null` (unknown, fail-closed against any advertised
+ * server-side limit) instead of being hardcoded to 0.
  */
 @Tag("live")
 @EnabledIfEnvironmentVariable(named = "CAMPUS_PHONE", matches = ".+")
@@ -33,6 +37,13 @@ class LiveRunTest {
 
     @Test
     fun `live submission reaches valid history record`() {
+        val confirm = System.getenv("CAMPUS_ALLOW_LIVE_SUBMIT")
+        require(confirm == "1") {
+            "CAMPUS_ALLOW_LIVE_SUBMIT is not \"1\": a live submission spends the daily " +
+                "budget (spec §5.5-4 ≤ 1) and needs explicit confirmation. Check that no " +
+                "record exists for today, then re-run with CAMPUS_ALLOW_LIVE_SUBMIT=1."
+        }
+
         val token = sessionFromEnv()
             ?: error(
                 "CAMPUS_TOKEN/CAMPUS_UID not set — mint a session via the upstream Python login path " +
@@ -45,7 +56,7 @@ class LiveRunTest {
             distanceM = LIVE_DISTANCE_M,
             durationSec = LIVE_DURATION_SEC,
             seed = Random.nextLong(),
-            runsToday = 0,
+            runsToday = null,
             log = logLines::add,
         )
         logLines.forEach { println("[live] $it") }

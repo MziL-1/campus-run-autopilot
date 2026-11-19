@@ -1,6 +1,7 @@
 package dev.campusrun.app.run
 
 import dev.campusrun.core.policy.RunPolicy
+import dev.campusrun.core.policy.RunPolicyValidator
 import dev.campusrun.core.session.Token
 import dev.campusrun.core.track.TrackPoint
 import dev.campusrun.core.upload.RunRecord
@@ -8,6 +9,7 @@ import dev.campusrun.core.upload.UploadHandle
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import java.time.LocalDate
 import java.util.concurrent.Executor
 
 /**
@@ -28,7 +30,8 @@ class RunViewModelTest {
         val fake = FakeRunStages(
             policy = policy(),
             track = track(distanceM = 2030, durationSec = 760),
-            record = RunRecord(id = "9001", distanceM = 2030, valid = true),
+            // Dated in the past: the pre-upload cross-session daily gate must let it through.
+            record = RunRecord(id = "9001", distanceM = 2030, valid = true, startTimeMs = PAST_MS),
         )
         val vm = RunViewModel(fake, TOKEN, DIRECT, settleWaitMs = 0)
 
@@ -40,6 +43,62 @@ class RunViewModelTest {
         assertEquals(2030, state.distanceM, "Success must carry the run's distance")
         assertTrue(state.message.contains("2030"), "mileage not displayed: ${state.message}")
         assertEquals(1, fake.uploadCalls, "a passing gate should upload exactly once")
+    }
+
+    @Test
+    fun `cross-session daily gate - a record dated today refuses before upload`() {
+        val fake = FakeRunStages(
+            policy = policy(),
+            track = track(distanceM = 2030, durationSec = 760),
+            record = RunRecord(id = "9002", distanceM = 2030, valid = true, startTimeMs = todayNoonMs()),
+        )
+        val vm = RunViewModel(fake, TOKEN, DIRECT, settleWaitMs = 0)
+
+        vm.startRun(distanceM = 2030, durationSec = 760)
+
+        val state = vm.state
+        assertTrue(state is RunState.Error, "today's record must refuse the run, got $state")
+        assertTrue(
+            (state as RunState.Error).message.contains("今日已有跑步记录"),
+            "refusal must name the cross-session daily rule: ${state.message}",
+        )
+        assertEquals(0, fake.uploadCalls, "the daily gate must stop the pipeline before upload")
+    }
+
+    @Test
+    fun `cross-session daily gate - an undated record fails closed before upload`() {
+        // No parseable startTime -> the gate cannot prove "not today", so it refuses.
+        val fake = FakeRunStages(
+            policy = policy(),
+            track = track(distanceM = 2030, durationSec = 760),
+            record = RunRecord(id = "9003", distanceM = 2030, valid = true),
+        )
+        val vm = RunViewModel(fake, TOKEN, DIRECT, settleWaitMs = 0)
+
+        vm.startRun(distanceM = 2030, durationSec = 760)
+
+        val state = vm.state
+        assertTrue(state is RunState.Error, "an undated record must fail closed, got $state")
+        assertTrue(
+            (state as RunState.Error).message.contains("缺少开始时间"),
+            "refusal must explain the missing date: ${state.message}",
+        )
+        assertEquals(0, fake.uploadCalls, "fail-closed must stop the pipeline before upload")
+    }
+
+    @Test
+    fun `cross-session daily gate - a record from an earlier day allows the run`() {
+        val fake = FakeRunStages(
+            policy = policy(),
+            track = track(distanceM = 2030, durationSec = 760),
+            record = RunRecord(id = "9004", distanceM = 2030, valid = true, startTimeMs = PAST_MS),
+        )
+        val vm = RunViewModel(fake, TOKEN, DIRECT, settleWaitMs = 0)
+
+        vm.startRun(distanceM = 2030, durationSec = 760)
+
+        assertTrue(vm.state is RunState.Success, "yesterday's record must not block: ${vm.state}")
+        assertEquals(1, fake.uploadCalls, "only today's record may refuse the upload")
     }
 
     @Test
@@ -72,7 +131,9 @@ class RunViewModelTest {
         val fake = FakeRunStages(
             policy = policy(),
             track = track(distanceM = 2030, durationSec = 760),
-            record = RunRecord(id = "9001", distanceM = 2030, valid = true),
+            // Past-dated so the cross-session gate lets the FIRST run through; the second
+            // run must then be caught by the in-session guard alone.
+            record = RunRecord(id = "9001", distanceM = 2030, valid = true, startTimeMs = PAST_MS),
         )
         val vm = RunViewModel(fake, TOKEN, DIRECT, settleWaitMs = 0)
         vm.startRun(distanceM = 2030, durationSec = 760)
@@ -158,5 +219,13 @@ class RunViewModelTest {
         val DIRECT = Executor { it.run() }
 
         const val METRES_PER_DEGREE_LNG = 111_194.9266
+
+        /** 2025-10-09 12:00 +08 — always an earlier day than "now" in these tests. */
+        const val PAST_MS = 1_760_000_000_000L
+
+        /** Noon today in the gate's zone, so the date comparison cannot flake around midnight. */
+        fun todayNoonMs(): Long =
+            LocalDate.now(RunPolicyValidator.RULE_ZONE).atTime(12, 0)
+                .atZone(RunPolicyValidator.RULE_ZONE).toInstant().toEpochMilli()
     }
 }

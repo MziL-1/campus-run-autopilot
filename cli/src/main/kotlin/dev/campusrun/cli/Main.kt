@@ -1,6 +1,8 @@
 package dev.campusrun.cli
 
 import dev.campusrun.core.api.ApiClient
+import dev.campusrun.core.config.FileParamsKeyStore
+import dev.campusrun.core.config.ParamsStore
 import dev.campusrun.core.config.ProtocolParams
 import dev.campusrun.core.crypto.NetSecKit
 import dev.campusrun.core.crypto.Signer
@@ -16,11 +18,14 @@ import dev.campusrun.core.upload.HistoryClient
 import dev.campusrun.core.upload.RunRecord
 import dev.campusrun.core.upload.RunUploader
 import dev.campusrun.core.upload.Settlement
+import dev.campusrun.core.upload.dailySelfLimitRefusal
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+import java.io.File
+import java.security.SecureRandom
 import kotlin.random.Random
 import kotlin.system.exitProcess
 
@@ -61,6 +66,7 @@ private fun printUsage() {
                                                一键跑：校验通过才提交，否则拒绝
           verify                               回查最新记录，达标退出码 0
         会话经环境变量传入：CAMPUS_TOKEN / CAMPUS_UID / CAMPUS_UNID
+        本机身份（线钥 + 设备盐）首次运行生成并持久化于 ~/.campusrun/，每台机器独立
         """.trimIndent(),
     )
 }
@@ -77,13 +83,31 @@ internal fun sessionFromEnv(): Token? {
 
 /**
  * Production wire parameters (upstream `core/config.py` + `core/crypto.py`): endpoint
- * `HOST_RUN`, the request RSA public key, and the protocol sign salt. `aesKey`/`kdfSalt`
- * are upstream per-request randomness pinned here to stable values — Task 3's documented
- * forced-determinism deviation: the server unwraps the key from each request and derives
- * the response key from the keyData segments the request itself carries, so any stable
- * 16/40-byte value works (these are protocol constants, not credentials).
+ * `HOST_RUN`, the request RSA public key and the protocol sign salt are protocol
+ * constants. `aesKey`/`kdfSalt` are **per-install random** values — generated on the
+ * first run, persisted under `~/.campusrun/` through [ParamsStore] over a file-backed
+ * [FileParamsKeyStore] (the same ASCII-hex T12 ruling the App's ParamsStore applies),
+ * reloaded on every later run. The literals below are only the *bundled fallback* used
+ * when persistence is unavailable (loudly logged by ParamsStore), never the steady state:
+ * a shared key set would make every clone of this binary present as one install.
  */
-internal fun productionParams(): ProtocolParams = ProtocolParams(
+internal fun productionParams(): ProtocolParams = installParams.current()
+
+/**
+ * The per-install params store, memoised so one process generates at most once (a
+ * mid-run key switch would churn keys within one run).
+ */
+private val installParams: ParamsStore by lazy { paramsStoreFor(identityDir()) }
+
+/** The store over [dir] — seam for tests, which must not write to the real home dir. */
+internal fun paramsStoreFor(dir: File): ParamsStore = ParamsStore(
+    bundled = bundledParams(),
+    keyStore = FileParamsKeyStore(File(dir, PARAMS_FILE)),
+    log = { message -> System.err.println(message) },
+)
+
+/** Bundled protocol constants + the shared-key fallback (see [productionParams]). */
+private fun bundledParams(): ProtocolParams = ProtocolParams(
     aesKey = "0123456789abcdef".toByteArray(Charsets.US_ASCII),
     // Exactly four 10-byte keyData segments (Signer/NetSecKit require 40 bytes; a live
     // probe caught a 44-byte literal here before any request left the device).
@@ -93,6 +117,9 @@ internal fun productionParams(): ProtocolParams = ProtocolParams(
     signSalt = "2slhe02lsfiwowlcixisla_sls-_slaor",
     versionTag = 1,
 )
+
+/** Per-install identity root: `~/.campusrun/` (wire keys + device salt), created on demand. */
+internal fun identityDir(): File = File(System.getProperty("user.home"), ".campusrun")
 
 /** Upstream `DEFAULT_DEVICE_CONFIG` header set with a stable tool-side DeviceId. */
 internal fun deviceHeaders(): Map<String, String> = mapOf(
@@ -105,17 +132,53 @@ internal fun deviceHeaders(): Map<String, String> = mapOf(
     "osType" to "0",
     "cpuModel" to "arm64-v8a",
     "deviceName" to "Android Device",
-    "DeviceId" to DeviceIdentity(DEVICE_ID_SALT, emptyMap()).stableId(),
+    "DeviceId" to DeviceIdentity(deviceSalt, emptyMap()).stableId(),
     "osVersion" to "13",
     "User-Agent" to "okhttp/4.12.0",
 )
 
+/** The per-install device salt, memoised so one process never re-derives the DeviceId. */
+private val deviceSalt: ByteArray by lazy { loadDeviceSalt(identityDir()) }
+
 /**
- * Stable tool-side device identity (spec §5.5-3: persisted, never churned). A source
- * constant is the CLI's persistence — the id is identical on every run of this tool
- * and distinct from any other install's salt.
+ * Spec §5.5-3 device identity: a random salt generated on the first run and persisted
+ * under [dir] as `device-salt.bin`, reloaded on every later run — so the CLI's `DeviceId`
+ * is stable per install but distinct from every other install (the review defect where a
+ * source constant made all clones present as ONE device). When the file cannot be read or
+ * written, this falls back to [FALLBACK_DEVICE_ID_SALT]: stable (never churned — churn
+ * would look like a new device to the server) but SHARED, and logged loudly, exactly like
+ * [ParamsStore]'s bundled-key fallback.
  */
-private val DEVICE_ID_SALT = "campusrun/cli/device-identity/v1".toByteArray(Charsets.UTF_8)
+internal fun loadDeviceSalt(dir: File): ByteArray {
+    val file = File(dir, SALT_FILE)
+    val existing = runCatching { if (file.isFile) file.readBytes() else null }
+        .getOrElse { e ->
+            System.err.println("identity: device salt read failed, regenerating: $e")
+            null
+        }
+    if (existing != null && existing.isNotEmpty()) return existing
+    val fresh = ByteArray(SALT_BYTES).also { SECURE_RANDOM.nextBytes(it) }
+    val persisted = runCatching {
+        file.parentFile?.mkdirs()
+        file.writeBytes(fresh)
+        true
+    }.getOrElse { e ->
+        System.err.println(
+            "identity: device salt persist failed, staying on the SHARED constant salt until " +
+                "persistence works: $e",
+        )
+        false
+    }
+    return if (persisted) fresh else FALLBACK_DEVICE_ID_SALT
+}
+
+/**
+ * Last-resort salt when `~/.campusrun/device-salt.bin` is unwritable — the pre-review
+ * constant, kept only so the DeviceId never churns between runs of one machine. It is
+ * shared by every install that hits this path (the defect being fixed), hence the loud
+ * log in [loadDeviceSalt]; a writable home dir always wins.
+ */
+private val FALLBACK_DEVICE_ID_SALT = "campusrun/cli/device-identity/v1".toByteArray(Charsets.UTF_8)
 
 /** Upstream `crypto.py REQ_RSA_PKCS1_B64` (public by construction). */
 private val RSA_PUBLIC_KEY_B64 = (
@@ -123,6 +186,15 @@ private val RSA_PUBLIC_KEY_B64 = (
         "bhmf9O+y3CUlZ5g4AMd2Ly4XbWUloG/O8+1USGJ8ddmrzbl8j2EZi0OhpVCYI381" +
         "+zZ0qa3z1cOuG2XdJnE7pO6Y4JNC37miqMXYmjejVi2QDIbONomfAgMBAAE="
     )
+
+/** File names under [identityDir]. */
+private const val PARAMS_FILE = "params.bin"
+private const val SALT_FILE = "device-salt.bin"
+
+/** Device salt length: 32 bytes of entropy, hashed by [DeviceIdentity] into a 32-hex DeviceId. */
+private const val SALT_BYTES = 32
+
+private val SECURE_RANDOM = SecureRandom()
 
 // ---------------------------------------------------------------- run orchestration
 
@@ -260,6 +332,22 @@ internal fun executeRun(
         return RunOutcome(skewMs, policy, track.size, violations, uploaded = false, rrid = null, record = null)
     }
     log("gate: passed (fence/checkpoints/pace/distance/window/face/daily)")
+
+    // Cross-session 每日 ≤1 (spec §5.5-4 #1): the newest history record must not already
+    // be today's. Read-only, immediately before the upload — the operator's --runs-today
+    // assertion no longer carries this rule on its own.
+    dailySelfLimitRefusal(HistoryClient(api).latest(token), nowMs)?.let { message ->
+        log("gate: REFUSED — $message")
+        return RunOutcome(
+            skewMs,
+            policy,
+            track.size,
+            listOf(message),
+            uploaded = false,
+            rrid = null,
+            record = null,
+        )
+    }
 
     val handle = RunUploader(api, NetSecKit, Signer, timeSync).uploadTrack(token, track) // stage: upload
     log("upload: OBS push accepted, uuid ${handle.uuid}")

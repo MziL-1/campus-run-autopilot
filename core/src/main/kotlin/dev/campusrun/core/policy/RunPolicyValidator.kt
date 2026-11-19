@@ -63,8 +63,13 @@ object RunPolicyValidator {
     /** Upstream builder `selDistance` default — the settlement completeness floor. */
     private const val SETTLEMENT_MIN_DISTANCE_M = 2000
 
-    /** School `validTime` is wall-clock local time of the Chinese campus platform. */
-    private val RULE_ZONE: ZoneId = ZoneId.of("Asia/Shanghai")
+    /**
+     * School `validTime` is wall-clock local time of the Chinese campus platform. Also the
+     * day boundary the history-based daily gate (`dailySelfLimitRefusal` in the upload
+     * package) reads: the platform counts a run's day in this same zone, so both rules
+     * share one clock.
+     */
+    val RULE_ZONE: ZoneId = ZoneId.of("Asia/Shanghai")
 
     /** Rule violations for one prospective submission; empty = pass (brief). */
     fun validate(track: List<TrackPoint>, policy: RunPolicy, nowEpochMs: Long): List<String> {

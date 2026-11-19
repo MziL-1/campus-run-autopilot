@@ -1,6 +1,7 @@
 package dev.campusrun.core.upload
 
 import dev.campusrun.core.api.ApiClient
+import dev.campusrun.core.policy.RunPolicyValidator
 import dev.campusrun.core.session.Token
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -12,9 +13,24 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
 
-/** One row of the run-history list, flattened like upstream `history/models.py`. */
-data class RunRecord(val id: String, val distanceM: Int, val valid: Boolean)
+/**
+ * One row of the run-history list, flattened like upstream `history/models.py`.
+ *
+ * @param startTimeMs epoch ms of the row's `startTime` — the 7.4.x 19-key row carries it
+ *   (findings §3.1 D) — normalised from epoch ms, epoch seconds or a `yyyy-MM-dd` date
+ *   string. `null` when the row carries no usable timestamp; see [dailySelfLimitRefusal]
+ *   for how the daily gate treats that.
+ */
+data class RunRecord(
+    val id: String,
+    val distanceM: Int,
+    val valid: Boolean,
+    val startTimeMs: Long? = null,
+)
 
 /**
  * History read-back, ported from upstream `协议/7.3.92/history/client.py`
@@ -59,12 +75,53 @@ class HistoryClient(val api: ApiClient) {
             id = rowId(row).toString(),
             distanceM = pyRound(rowDistanceM(row)).toInt(),
             valid = rowValid(row),
+            startTimeMs = rowStartTimeMs(row),
         )
     }
 
     private companion object {
         const val RECORDS_PATH = "/api/v70230/runnings/records"
         const val BUSINESS_SUCCESS = 10000L
+    }
+}
+
+/**
+ * Cross-session 每日 ≤1 gate (spec §5.5-4 #1 risk rule; final-fix-wave executor ruling).
+ * The in-session self-limit in both shells only sees one process, so before any upload the
+ * caller must show the account has NOT already run today — this function answers that from
+ * [HistoryClient.latest], the newest history row.
+ *
+ * Returns the refusal message when submission must not proceed, `null` when it may:
+ *
+ * - no record at all → first run, proceed;
+ * - record dated **today** (read in [zone], the platform's wall clock) → refuse, daily ≤1;
+ * - record dated a **future** day (server clock ahead / corrupt timestamp) → refuse
+ *   (fail-closed: it is not "an earlier day", so it must not open the gate);
+ * - record present but **undated** → refuse (fail-closed: an unparseable `startTime` must
+ *   not silently reopen the very gap this gate exists to close);
+ * - record dated strictly before today → proceed.
+ *
+ * Known limitation, documented rather than hidden: [HistoryClient.latest] returns `null`
+ * both for an empty history and for a business-error envelope, so a *rejected* history
+ * query reads as "no record" and proceeds. Transport failures throw and abort the run
+ * (fail-closed) before this function is reached.
+ */
+fun dailySelfLimitRefusal(latest: RunRecord?, nowMs: Long, zone: ZoneId = RunPolicyValidator.RULE_ZONE): String? {
+    if (latest == null) return null
+    val startMs = latest.startTimeMs
+        ?: return (
+            "最新记录 id=${latest.id} 缺少开始时间，无法确认今日是否已跑 " +
+                "—— 已拒绝（fail-closed），请人工核对历史记录"
+            )
+    val today = Instant.ofEpochMilli(nowMs).atZone(zone).toLocalDate()
+    val recordDay = Instant.ofEpochMilli(startMs).atZone(zone).toLocalDate()
+    return when {
+        recordDay < today -> null
+        recordDay == today ->
+            "今日已有跑步记录（id=${latest.id}，${latest.distanceM} m），按每日 1 次自限拒绝再次提交"
+        else ->
+            "最新记录 id=${latest.id} 的开始时间 ${recordDay} 晚于今日 ${today}，" +
+                "无法确认今日是否已跑 —— 已拒绝（fail-closed），请人工核对历史记录"
     }
 }
 
@@ -111,6 +168,27 @@ private fun rowValid(row: JsonObject): Boolean {
     if (complete == false || valid == false) return false
     val status = row.longField("status")
     return valid == true || (status == 1L && complete == true)
+}
+
+/**
+ * Upstream row `startTime` (history/models.py reads it as `int`): epoch ms, epoch
+ * seconds, or a `yyyy-MM-dd[...]` date string — the three shapes the Task 9 history
+ * preflight (`reference/out/_obs/history_dates.py`) saw in the wild. `null` when the row
+ * carries no usable timestamp, which [dailySelfLimitRefusal] fails closed on.
+ */
+private fun rowStartTimeMs(row: JsonObject): Long? {
+    val text = row.primitive("startTime")?.contentOrNull?.trim().orEmpty()
+    if (text.isEmpty()) return null
+    text.toLongOrNull()?.let { n ->
+        return when {
+            n > 10_000_000_000L -> n // epoch milliseconds
+            n > 1_000_000_000L -> n * 1000 // epoch seconds
+            else -> null // 0 / not a timestamp
+        }
+    }
+    // Date-shaped string: anchor at local noon so the calendar day is unambiguous.
+    val date = runCatching { LocalDate.parse(text.take(10).replace('/', '-')) }.getOrNull() ?: return null
+    return date.atTime(12, 0).atZone(RunPolicyValidator.RULE_ZONE).toInstant().toEpochMilli()
 }
 
 private fun JsonObject.longField(key: String): Long? =
