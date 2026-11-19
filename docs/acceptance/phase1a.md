@@ -198,3 +198,38 @@ run: verify: id=1369631995, 2030 m, valid=true
 - **诚实性**：T13 2030 m vs dayGoal 的判断项按证据裁定为"可接受+灰度观察"而非隐藏；liveTest 未今日重跑的原因是纪律而非省事，且已排期。
 - **证据文件（会话本地，未入库）**：`%TEMP%\opencode\` 下 `t14-home.xml`、`t14-diag2.xml`、`t14-update-prompt.xml`、`t14-update-dialog.png`、`t14-after-dismiss.xml`、`t14-official-login.xml`、`t14-baseline2.xml`、`t14-update-sim\`、`t14-diag-export\`。
 - **设备状态（可选清理，按裁定留置）**：`stayon usb`、`screen_off_timeout`、T12 遗留 `adb forward tcp:9222` 未回收；工具为干净重建 debug 包且会话保留；官方 App 留在登录页未动；`adb reverse` 已移除。锁屏 keyguard 在验收中被临时解除（`wm dismiss-keyguard`）。
+
+## 5. 执行者裁定（final-fix wave 补记）
+
+以下三条为整支分支 review 后执行者作出的裁定，记录于此以免后续波次重新讨论。
+
+### 5.1 telemetry = 有意延后（deliberate deferral）
+
+spec §5.1 架构图中的 `telemetry 冷启动/页面曝光埋点模拟（行为一致性）` 层**在 Phase 1a 未实现，
+且这是有意延后而非遗漏**：该层的唯一价值是让工具的埋点行为与官方 App 一致，从而降低被
+"行为不一致"风控命中的概率；但在拿到"服务端确实校验埋点"的证据之前，实现它只是凭空增加
+出错面与维护成本（埋点字段一变就要跟着改，反而更容易暴露差异）。因此裁定：**先不实现，
+直到出现服务端依赖埋点的实证**（例如官方 App 抓包显示某埋点缺失会导致校验失败、或风控
+信号明确指向行为序列）。届时再按 spec §5.1 补齐，并在灰度日志中记录触发证据。在此之前，
+任何"补齐 telemetry"的排期请求都应被当作范围扩张拒绝。
+
+### 5.2 OAID = 延后至验收②的设备计数证据
+
+Phase 1a 的设备身份策略是**基于 `Settings.Secure.ANDROID_ID` + 机型/厂商 hint 的本地持久化
+稳定 ID**（`MainActivity.resolveDeviceIdentity` → `DeviceIdentity.stableId()`，首次登录后
+以 `DeviceIdentitySnapshot` 固定，之后 hint 变化不再改写）。这是**已记录的策略**而非妥协：
+无 Root 读不到官方 App 的私有存储，而 OAID 需要额外的 SDK 接入与用户授权流程，成本高且
+收益未知。**是否改用 OAID 同源上报，取决于验收②（本文件 §1.2）的设备计数结论**：若官方
+App 与本工具在同一台手机上被服务端计为两台设备，则 OAID 同源的收益成立、值得接入；若
+已计为同一台，则维持 androidId 方案、OAID 继续延后。换言之 OAID 不是 Phase 1a 的待办，
+而是验收② PENDING 项的**条件后续**。
+
+### 5.3 参数热更 = 强制 APK（常备策略）
+
+**`params` 变更 = forced APK，直到存在 params-doc 端点为止。** 仓库内没有
+`config/params.json` 之类的远端协议参数文档，`version.json` 只覆盖最低 APK 版本、配置
+版本、协议参数版本与下载镜像 URL 四项（spec §5.6），因此签名盐 / endpoint / RSA 公钥等
+协议参数的任何变更都必须通过**发布新 APK** 分发，不得依赖热更通道。这条与
+`MainActivity.UPDATE_MIRRORS` KDoc 中的既有说明一致，此处提升为验收文档级的常备策略；
+当且仅当 params-doc 端点真正落地后才可重新评估。同一边界下的另一半也成立：逻辑级变更
+（含 `minApkVersionCode` 抬升）同样只走"提示新 APK"，不做脚本引擎 / 动态代码加载。
