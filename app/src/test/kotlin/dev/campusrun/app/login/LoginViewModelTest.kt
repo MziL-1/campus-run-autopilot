@@ -19,7 +19,7 @@ class LoginViewModelTest {
 
     @Test
     fun `success - fake authenticator returning a token lands in Success`() {
-        val token = Token(value = "tok-1", uid = "10549846", unid = "35102", expiresAtMs = null)
+        val token = Token(value = "tok-1", uid = "10000001", unid = "90001", expiresAtMs = null)
         val fake = object : Authenticator {
             override fun login(phone: String, password: String, captcha: CaptchaHandler): Token {
                 captcha.skip()
@@ -28,14 +28,14 @@ class LoginViewModelTest {
         }
         val vm = LoginViewModel(fake, DIRECT)
 
-        vm.submit("13800000000", "hunter2")
+        vm.submit("10086000000", "hunter2")
 
         assertEquals(LoginState.Success(token), vm.state)
     }
 
     @Test
     fun `captcha required - state moves to NeedCaptcha then completes after the solve`() {
-        val token = Token(value = "tok-2", uid = "10549846", unid = "35102", expiresAtMs = null)
+        val token = Token(value = "tok-2", uid = "10000001", unid = "90001", expiresAtMs = null)
         val fake = object : Authenticator {
             override fun login(phone: String, password: String, captcha: CaptchaHandler): Token {
                 captcha.solve(CaptchaRequest(CAPTCHA_ID))
@@ -45,7 +45,7 @@ class LoginViewModelTest {
         // Background executor: solve() blocks the login worker until the test delivers the proof.
         val vm = LoginViewModel(fake)
 
-        vm.submit("13800000000", "hunter2")
+        vm.submit("10086000000", "hunter2")
 
         assertEquals(LoginState.NeedCaptcha, vm.await { it is LoginState.NeedCaptcha })
         vm.onCaptchaSolved(CaptchaResult("lot", "pass", "gen", "out"))
@@ -61,7 +61,7 @@ class LoginViewModelTest {
         }
         val vm = LoginViewModel(fake, DIRECT)
 
-        vm.submit("13800000000", password)
+        vm.submit("10086000000", password)
 
         val state = vm.state
         assertTrue(state is LoginState.Error, "expected Error, got $state")

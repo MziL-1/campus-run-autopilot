@@ -53,7 +53,7 @@ SyntaxError: f-string: unmatched '['
 | `sync-time` | `GET run.gxapp.iydsj.com/api/v3/getserver/gmttime` | HTTP 200；服务端时间解析成功，偏斜 −2.84 ~ −2.91s（多次一致） | **通过** |
 | 登录① `checkGeeUse` | `POST /api/v65/security/checkGeeUse` | HTTP 200；要求人机校验（未走白名单分支） | **通过** |
 | 登录② `geevalidate` | `POST /api/v70270/security/geevalidate` | HTTP 200；业务码 `10000`；极验 v4 滑块**两次独立求解均第 1 次尝试即通过** | **通过** |
-| 登录③ `login` | `POST /api/v70100/login` | HTTP 200；业务码 `10000`，返回完整档案与实际会话凭据（`uid=10549846`、`unid=35102`、中原工学院 中原校区） | **通过** |
+| 登录③ `login` | `POST /api/v70100/login` | HTTP 200；业务码 `10000`，返回完整档案与实际会话凭据（`uid=10000001`、`unid=90001`、示例大学 示例校区） | **通过** |
 | 登录（同账号二次登录） | 同上 | HTTP 200；业务码 `10121`「此账号已在其他设备登录…」 | **通过**（单会话保护语义未变） |
 | `profile`（详细档案） | `GET /api/v70390/user/info` | HTTP 200；解密出 **52 个键**。`phone`/`mobile` 不存在（改为 `telephone`），`major` 不存在 | **参数变**（字段重命名/删减） |
 | `profile`（首页基础信息） | `GET /api/v76/user/homePageBaseUserInfo` | HTTP 200；解密出 **9 个键**：无 `studentNo`/`studentId`，`name` 返回的是**昵称**而非真名 | **参数变** |

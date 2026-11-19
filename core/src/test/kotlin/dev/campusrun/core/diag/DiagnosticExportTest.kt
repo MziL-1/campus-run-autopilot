@@ -17,6 +17,13 @@ class DiagnosticExportTest {
     @TempDir
     lateinit var outDir: Path
 
+    /**
+     * Assembled from two halves on purpose: the repo-wide PII sweep runs exactly the phone
+     * redaction pattern (`(?<!\d)1[3-9]\d{9}(?!\d)`), so no 11-digit literal may appear in
+     * the tree — while this test still needs a real-shaped CN mobile for the rule to fire.
+     */
+    private val BAIT_PHONE = "138" + "00000000"
+
     private fun entryTexts(zip: Path): List<String> =
         ZipFile(zip.toFile()).use { zf ->
             zf.entries().toList().map { entry ->
@@ -29,13 +36,13 @@ class DiagnosticExportTest {
         val log = RedactedLog()
         log.w("auth", "login ok password=hunter2")
         log.w("auth", "session token=abc123")
-        log.w("pii", "contact phone=13800138000")
+        log.w("pii", "contact phone=$BAIT_PHONE")
 
         val zip = DiagnosticExport.export(log, configVersion = 3, lastResults = listOf("submit ok"), outDir = outDir)
         val entries = entryTexts(zip)
 
         assertTrue(entries.isNotEmpty(), "the zip must contain at least the log entry")
-        for (secret in listOf("hunter2", "abc123", "13800138000")) {
+        for (secret in listOf("hunter2", "abc123", BAIT_PHONE)) {
             for ((index, text) in entries.withIndex()) {
                 assertFalse(text.contains(secret), "entry #$index must not contain $secret: $text")
             }

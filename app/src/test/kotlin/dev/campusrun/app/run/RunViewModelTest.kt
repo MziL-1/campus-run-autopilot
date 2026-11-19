@@ -138,7 +138,7 @@ class RunViewModelTest {
             uploadCalls += 1
             return UploadHandle(
                 uid = "12345678",
-                unid = "35102",
+                unid = "90001",
                 uuid = "00000000-0000-0000-0000-000000000000",
                 startTimeMs = 1_700_000_000_000L,
                 stopTimeMs = 1_700_000_000_000L + 760_000L,
@@ -152,7 +152,7 @@ class RunViewModelTest {
 
     private companion object {
         /** Dummy session — no credential material (fixtures rule). */
-        val TOKEN = Token(value = "unit-test-token", uid = "12345678", unid = "35102", expiresAtMs = null)
+        val TOKEN = Token(value = "unit-test-token", uid = "12345678", unid = "90001", expiresAtMs = null)
 
         /** Runs the pipeline inline on the calling thread — deterministic legs. */
         val DIRECT = Executor { it.run() }

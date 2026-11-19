@@ -88,7 +88,7 @@ geevalidate(error==10000) ──► login(Basic) ► Token
 
 ## 5. 真机验证：测试账号登录拿到 Token
 
-**结论：硬门槛通过 —— 真机 `9c76d417` 用测试账号走完 checkGeeUse → gt4 滑块 → geevalidate → login，拿到真实 Token（uid=10549846, unid=35102），杀进程重开后登录态保持。** 2026-11-19 上午实测，APK 与本仓库提交代码一致。
+**结论：硬门槛通过 —— 真机 `9c76d417` 用测试账号走完 checkGeeUse → gt4 滑块 → geevalidate → login，拿到真实 Token（uid=10000001, unid=90001），杀进程重开后登录态保持。** 2026-11-19 上午实测，APK 与本仓库提交代码一致。
 
 ### 5.1 设备链路（adb 命令与关键输出，凭据仅 inline env 注入、不落任何文件）
 
@@ -113,7 +113,7 @@ geevalidate(error==10000) ──► login(Basic) ► Token
 09:55:24.678 I CampusRun: net< 200 … type=application/json peekLen=2179
 ```
 
-- UI 终态：`登录成功 / uid=10549846  unid=35102 / 会话已加密保存在本机`（截图存于本机 `%TEMP%\t12-loggedin.png`，未入库；凭据与四元组不落报告）。
+- UI 终态：`登录成功 / uid=10000001  unid=90001 / 会话已加密保存在本机`（截图存于本机 `%TEMP%\t12-loggedin.png`，未入库；凭据与四元组不落报告）。
 
 ### 5.3 杀进程重开（token 持久化，spec C7）
 
@@ -123,7 +123,7 @@ $ adb -s 9c76d417 shell pidof dev.campusrun.autopilot      # (空 — 进程已�
 $ adb -s 9c76d417 shell am start -n dev.campusrun.autopilot/.MainActivity
 Starting: Intent { cmp=dev.campusrun.autopilot/.MainActivity }
 $ adb shell uiautomator dump … 解析 text=
-登录成功 / uid=10549846  unid=35102 / 会话已加密保存在本机
+登录成功 / uid=10000001  unid=90001 / 会话已加密保存在本机
 ```
 
 - 佐证：`run-as dev.campusrun.autopilot ls shared_prefs/` → `campusrun_secure.xml`（09:55 登录时写入，EncryptedSharedPreferences AES256-SIV/GCM）在 force-stop 后仍在；**再次 `install -r` 覆盖安装后登录态依旧保持**（第三重证明）。`campusrun_params.xml` 为安装期密钥 blob，与会话分离（logout 不可触碰）。

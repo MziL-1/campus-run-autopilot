@@ -419,7 +419,7 @@ git commit -m "feat: update channel and hot config params"
 
 - [ ] **Step 1: 写失败测试**
 
-日志喂入 `password=hunter2`、`token=abc123`、`phone=13800138000` → 导出 zip 内所有条目：`hunter2`/`abc123`/`13800138000` 均**不出现**，且出现对应 `[REDACTED]`。
+日志喂入 `password=hunter2`、`token=abc123`、`phone=<11位手机号>` → 导出 zip 内所有条目：`hunter2`/`abc123`/`<11位手机号>` 均**不出现**，且出现对应 `[REDACTED]`。
 Run: `./gradlew :core:test` → FAIL。
 
 - [ ] **Step 2: 实现**（脱敏规则：token、password、手机号、uid 四类；后续可扩）

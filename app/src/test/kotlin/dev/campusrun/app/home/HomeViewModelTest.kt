@@ -117,7 +117,7 @@ class HomeViewModelTest {
 
     private companion object {
         /** Dummy session — no credential material (fixtures rule). */
-        val TOKEN = Token(value = "unit-test-token", uid = "12345678", unid = "35102", expiresAtMs = null)
+        val TOKEN = Token(value = "unit-test-token", uid = "12345678", unid = "90001", expiresAtMs = null)
 
         const val CURRENT_VERSION = 1
 

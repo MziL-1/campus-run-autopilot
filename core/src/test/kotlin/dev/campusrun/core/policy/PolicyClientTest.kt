@@ -234,7 +234,7 @@ class PolicyClientTest {
             requestBodies,
         )
 
-        val policy = PolicyClient(api).fetch(Token("session-value", "uid-42", "35102", null), mode = 1)
+        val policy = PolicyClient(api).fetch(Token("session-value", "uid-42", "90001", null), mode = 1)
 
         assertEquals(
             listOf("/api/v70103/runModePolicy", "/api/v1/getGeoFenceForRun", "/api/v560/get/1/distance/2000"),
@@ -263,7 +263,7 @@ class PolicyClientTest {
         )
         assertEquals(0.0, checkpoint.getValue("latitude").jsonPrimitive.content.toDouble())
         assertEquals(0.0, checkpoint.getValue("longitude").jsonPrimitive.content.toDouble())
-        assertEquals(35102, checkpoint.getValue("selectedUnid").jsonPrimitive.content.toInt())
+        assertEquals(90001, checkpoint.getValue("selectedUnid").jsonPrimitive.content.toInt())
         assertEquals(-1, checkpoint.getValue("runAreaId").jsonPrimitive.content.toInt())
         assertEquals("", checkpoint.getValue("runec").jsonPrimitive.content)
         assertEquals(36, checkpoint.getValue("uuid").jsonPrimitive.content.length)
@@ -285,7 +285,7 @@ class PolicyClientTest {
             paths,
         )
 
-        val policy = PolicyClient(api).fetch(Token("session-value", "uid-42", "35102", null), mode = 1)
+        val policy = PolicyClient(api).fetch(Token("session-value", "uid-42", "90001", null), mode = 1)
 
         assertTrue(paths.contains("/api/v560/get/1/distance/2000"), "five-point must be attempted: $paths")
         assertTrue(policy.requiredPoints.isEmpty())
@@ -311,7 +311,7 @@ class PolicyClientTest {
             paths,
         )
 
-        val policy = PolicyClient(api).fetch(Token("session-value", "uid-42", "35102", null), mode = 1)
+        val policy = PolicyClient(api).fetch(Token("session-value", "uid-42", "90001", null), mode = 1)
 
         // Upstream execute_full_run only queries checkpoints when the fence has none.
         assertEquals(listOf("/api/v70103/runModePolicy", "/api/v1/getGeoFenceForRun"), paths)
@@ -329,7 +329,7 @@ class PolicyClientTest {
             paths,
         )
 
-        val policy = PolicyClient(api).fetch(Token("session-value", "uid-42", "35102", null), mode = 1)
+        val policy = PolicyClient(api).fetch(Token("session-value", "uid-42", "90001", null), mode = 1)
 
         // Upstream get_run_policy returns None for a business error -> valid empty policy,
         // while the fence call still runs and its (empty) geometry is preserved.
@@ -357,7 +357,7 @@ class PolicyClientTest {
             paths,
         )
 
-        val policy = PolicyClient(api).fetch(Token("session-value", "uid-42", "35102", null), mode = 5)
+        val policy = PolicyClient(api).fetch(Token("session-value", "uid-42", "90001", null), mode = 5)
 
         assertEquals(listOf("/api/v59/indoorRunModePolicy", "/api/v1/getGeoFenceForRun"), paths)
         assertEquals(0, policy.paceMinSecPerKm)
