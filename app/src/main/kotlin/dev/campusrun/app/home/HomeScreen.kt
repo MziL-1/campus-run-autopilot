@@ -20,13 +20,16 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 
 /**
  * Home (brief Step 3): the risk-control screen (spec §5.5-6/7) — this school's rules and
  * current progress from [HomeViewModel] (visible so users judge for themselves), the
- * first-run risk notice, navigation into the one-shot run and the diagnostics export,
- * and the non-blocking update prompt raised by the startup `version.json` check.
+ * first-run risk notice (incl. the ≤3-device red line, spec §5.5-3), navigation into the
+ * one-shot run and the diagnostics export, the non-blocking update prompt raised by the
+ * startup `version.json` check, and the spec §7 About surface.
  */
 @Composable
 fun HomeScreen(
@@ -36,15 +39,35 @@ fun HomeScreen(
 ) {
     LaunchedEffect(Unit) { vm.refresh() }
     val state = vm.state
+    val clipboard = LocalClipboardManager.current
 
     vm.updatePrompt?.let { prompt ->
         // Non-blocking (spec G4/R5): a dismissible dialog — the app keeps working without updating.
         AlertDialog(
             onDismissRequest = vm::dismissUpdatePrompt,
             title = { Text("发现新版本") },
-            text = { Text(prompt) },
+            text = {
+                Column {
+                    Text(prompt.message)
+                    prompt.downloadUrl?.let { url ->
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            url,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            },
             confirmButton = {
-                TextButton(onClick = vm::dismissUpdatePrompt) { Text("知道了") }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    prompt.downloadUrl?.let { url ->
+                        TextButton(onClick = { clipboard.setText(AnnotatedString(url)) }) {
+                            Text("复制链接")
+                        }
+                    }
+                    TextButton(onClick = vm::dismissUpdatePrompt) { Text("知道了") }
+                }
             },
         )
     }
@@ -67,6 +90,14 @@ fun HomeScreen(
                 Text(
                     "仅供学习与研究使用，使用风险自负。查实作弊将清除当次及累计里程、全校通报并" +
                         "额外扣减公里，累计多次本学期 0 分；违反校规 / 服务条款的后果由使用者承担。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
+                // 设备占用红线 (spec §5.5-3): UI must state it, users must not multi-device login.
+                Text(
+                    "设备占用提示：本工具与官方 App 可能分别计入设备数（单账号上限 3 台），" +
+                        "请勿在多台设备登录同一账号。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -128,6 +159,27 @@ fun HomeScreen(
 
         TextButton(onClick = { vm.refresh() }, modifier = Modifier.fillMaxWidth()) {
             Text(if (state.loading) "刷新中…" else "刷新规则与进度")
+        }
+
+        // 关于 / 合规声明 (spec §7): 上游 MIT 致谢 + 明示免费/无售后/不建用户数据.
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp)) {
+                Text("关于本工具", style = MaterialTheme.typography.titleSmall)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "协议实现移植 / 衍生自 com.zjwh.android_wh_physicalfitness（MIT License）：" +
+                        "https://github.com/Inverx/com.zjwh.android_wh_physicalfitness",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "本工具免费分发：不收取任何费用、无售后、不建立用户数据；" +
+                        "仅供学习与研究使用，使用风险自负。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }

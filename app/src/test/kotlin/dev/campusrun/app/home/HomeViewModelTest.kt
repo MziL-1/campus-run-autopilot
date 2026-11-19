@@ -5,6 +5,7 @@ import dev.campusrun.core.policy.LatLng
 import dev.campusrun.core.policy.RunPolicy
 import dev.campusrun.core.session.Token
 import dev.campusrun.core.upload.RunRecord
+import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
@@ -62,10 +63,34 @@ class HomeViewModelTest {
 
         val prompt = vm.updatePrompt
         assertNotNull(prompt, "minApkVersionCode > current must raise the prompt state")
-        assertTrue(prompt!!.contains("${CURRENT_VERSION + 1}"), "prompt must name the required version: $prompt")
+        assertTrue(
+            prompt!!.message.contains("${CURRENT_VERSION + 1}"),
+            "prompt must name the required version: $prompt",
+        )
+        assertNull(prompt.downloadUrl, "no mirror in the document -> no link to offer")
 
         vm.dismissUpdatePrompt()
         assertNull(vm.updatePrompt, "the prompt is dismissible (non-blocking)")
+    }
+
+    @Test
+    fun `update required - prompt carries the first apk mirror url`() {
+        val mirror = "https://example.invalid/releases/v9.apk"
+        val vm = HomeViewModel(FakeHomeData(policy(), null), TOKEN, CURRENT_VERSION, DIRECT)
+
+        vm.onVersionCheck(
+            RemoteVersionInfo(
+                minApkVersionCode = CURRENT_VERSION + 1,
+                configVersion = 1,
+                protocolParamsVersion = 1,
+                // Ordered mirrors: only the FIRST may surface in the dialog.
+                apkMirrors = listOf(mirror, "https://mirror2.invalid/releases/v9.apk"),
+            ),
+        )
+
+        val prompt = vm.updatePrompt
+        assertNotNull(prompt, "a required update must raise the prompt state")
+        assertEquals(mirror, prompt!!.downloadUrl, "dialog must offer the first apk mirror")
     }
 
     @Test

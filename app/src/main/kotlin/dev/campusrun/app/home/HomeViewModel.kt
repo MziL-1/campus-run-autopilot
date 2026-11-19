@@ -36,6 +36,13 @@ interface HomeData {
 }
 
 /**
+ * The non-blocking update prompt (spec G4/R5): the human-readable [message] plus the
+ * first `apkMirrors` URL so the user can actually reach the download ([downloadUrl] is
+ * null only when the document carried no mirror).
+ */
+data class UpdatePrompt(val message: String, val downloadUrl: String?)
+
+/**
  * Home state owner: loads the school rules + latest history record on [executor], and
  * turns the startup `version.json` result ([onVersionCheck]) into a **non-blocking**
  * prompt state — `null` document (every mirror failed) stays silent, `minApkVersionCode >
@@ -54,7 +61,7 @@ class HomeViewModel(
         private set
 
     /** Update-required prompt (提示态); `null` = no prompt. Dismissible, never blocking. */
-    var updatePrompt: String? by mutableStateOf(null)
+    var updatePrompt: UpdatePrompt? by mutableStateOf(null)
         private set
 
     /**
@@ -85,9 +92,12 @@ class HomeViewModel(
     fun onVersionCheck(info: RemoteVersionInfo?) {
         if (info == null) return
         if (updateChecker.updateRequired(info, currentApkVersionCode)) {
-            updatePrompt =
-                "发现新版本：最低要求版本号 ${info.minApkVersionCode}（当前 $currentApkVersionCode）。" +
-                "请下载更新最新 APK 后继续使用。"
+            updatePrompt = UpdatePrompt(
+                message = "发现新版本：最低要求版本号 ${info.minApkVersionCode}（当前 $currentApkVersionCode）。" +
+                    "请下载更新最新 APK 后继续使用。",
+                // First mirror only (spec §8-6 下载多镜像 URL): the dialog offers one link.
+                downloadUrl = info.apkMirrors.firstOrNull(),
+            )
         }
     }
 
