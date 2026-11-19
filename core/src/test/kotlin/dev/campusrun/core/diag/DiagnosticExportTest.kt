@@ -18,11 +18,13 @@ class DiagnosticExportTest {
     lateinit var outDir: Path
 
     /**
-     * Assembled from two halves on purpose: the repo-wide PII sweep runs exactly the phone
+     * Assembled at runtime on purpose: the repo-wide PII sweep runs exactly the phone
      * redaction pattern (`(?<!\d)1[3-9]\d{9}(?!\d)`), so no 11-digit literal may appear in
-     * the tree — while this test still needs a real-shaped CN mobile for the rule to fire.
+     * the tree — including folded into a `.class` constant — while this test still needs a
+     * real-shaped CN mobile for the rule to fire. Not a `const`/literal concatenation:
+     * the Kotlin compiler would otherwise fold it back into one string constant.
      */
-    private val BAIT_PHONE = "138" + "00000000"
+    private val BAIT_PHONE = listOf("138", "00000000").joinToString("")
 
     private fun entryTexts(zip: Path): List<String> =
         ZipFile(zip.toFile()).use { zf ->
