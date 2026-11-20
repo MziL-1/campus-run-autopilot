@@ -13,7 +13,7 @@
 | ② | 官方 App 与本工具同机并存，记录设备计数表现（spec §5.5-3 验证项） | **PARTIAL** — 同机并存 PASS（两包并存实测）；**服务端设备计数口径 PENDING（需登录官方 App 查看）**，指引见 §3 | §1.2 |
 | ③ | 模拟 `version.json` 高版本 → App 启动提示更新（多镜像之一故意失效验证回退） | **PASS**（AlertDialog 实机渲染 + 可关闭 + 坏镜像回退全链路；关闭 T13 遗留 minor） | §1.3 |
 | ④ | 诊断包导出且无凭据 | **PASS**（当日新导出 ×2 拉回逐字节扫描，0 命中） | §1.4 |
-| ⑤ | `./gradlew test :cli:liveTest` 全绿 | **PARTIAL** — 离线全量今日复跑全绿（core 71 / cli 18 / app 16×2 变体，0 失败）+ `:app:assembleDebug` 成功；live 部分按裁定引用两次既有 live PASS，**新的 liveTest 排期 2026-11-20**（今日提交预算已耗尽，再跑即当日第 2 次提交=违规） | §1.5 |
+| ⑤ | `./gradlew test :cli:liveTest` 全绿 | **PASS**（2026-11-20 更新）——离线全量复跑全绿（core 71 / cli 18 / app 16×2 变体，0 失败）+ `:app:assembleDebug` 成功；**新鲜 `:cli:liveTest` 已于 2026-11-20 13:39 执行并 PASS**（`tests=1 failures=0`，预检 CLEAN 后单次提交，证据见灰度日志第 1 天：`rrid=1370876678`、`2030 m`、`valid=true`、OBS uuid `6a374786…`） | §1.5 |
 
 > 结论：**允许自 2026-11-20 起进入灰度（开发者自用）**，前提是 §2 所列条件全部成立；公开分发仍由 spec §6.3 七日标准把关（模板：`docs/acceptance/grayscale-log-template.md`）。
 
@@ -148,7 +148,7 @@ run: verify: id=1369631995, 2030 m, valid=true
 - **两次既有 live 证据**：
   1. T9 `:cli:liveTest` **PASS**，2026-11-17（结果文件 `TEST-dev.campusrun.cli.LiveRunTest.xml`：`tests=1 failures=0 errors=0`，`timestamp=2026-11-17T09:57:36Z` = 本地 17:57:36、文件 mtime 17:57:39，与 T9 链 v4 排程一致；输出 `[live] settle: save/record accepted, rrid=1367719089`、`[live] verify: id=1367719089, 2030 m, valid=true`）；
   2. 2026-11-19 App 路径一键跑 **PASS**，`id=1369631995, 2030 m, valid=true`（11:04:56，今日唯一提交，§1.1）。
-- **新鲜 `:cli:liveTest` 排期 2026-11-20**（灰度第 1 天、提交预算随零点重置）——此为硬性待办，写入灰度日志第 1 天备注；届时若已先行人工提交则顺延并记录，仍守每日 ≤1。
+- **新鲜 `:cli:liveTest` 已于 2026-11-20 13:39 执行全绿**（灰度第 1 天，排期兑现）：登录铸 token → 预检 `PREFLIGHT=CLEAN` → `CAMPUS_ALLOW_LIVE_SUBMIT=1` → `tests=1 failures=0`；输出 `[live] settle: save/record accepted, rrid=1370876678`、`[live] verify: id=1370876678, 2030 m, valid=true`。执行脚本 `reference/out/_obs/grayscale_day1.ps1`（凭据仅经环境变量，ASCII-only 规避 PS5.1 编码坑）。
 
 ---
 
