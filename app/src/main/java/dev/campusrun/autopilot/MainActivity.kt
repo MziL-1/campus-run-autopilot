@@ -310,9 +310,9 @@ class MainActivity : ComponentActivity() {
          * with raw GitHub as the ordered fallback — `UpdateChecker` tries them in order and
          * every failure fails silent to "no update" (logged into the diagnostics log only).
          *
-         * `OWNER/REPO` are placeholders until the public repo exists — the committed
-         * `config/version.json` sample uses the same placeholder — so today every check
-         * 404s into `null`; publishing the repo means replacing exactly this one constant.
+         * The public repository exists: `MziL-1/campus-run-autopilot` — both roots below
+         * point at it, and the committed `config/version.json` sample carries matching
+         * `apkMirrors` (synced from the same file at release time).
          *
          * **Remote params document decision (T10 handoff / ruling 3): deferred.** No
          * `config/params.json` exists on any mirror yet, and [ApiClient] snapshots its
@@ -324,8 +324,8 @@ class MainActivity : ComponentActivity() {
          * nothing else in this task changes.
          */
         private val UPDATE_MIRRORS = listOf(
-            "https://cdn.jsdelivr.net/gh/OWNER/REPO@main",
-            "https://raw.githubusercontent.com/OWNER/REPO/main",
+            "https://cdn.jsdelivr.net/gh/MziL-1/campus-run-autopilot@main",
+            "https://raw.githubusercontent.com/MziL-1/campus-run-autopilot/main",
         )
 
         /**
