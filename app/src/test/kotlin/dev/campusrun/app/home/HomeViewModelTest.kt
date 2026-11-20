@@ -4,6 +4,7 @@ import dev.campusrun.core.config.RemoteVersionInfo
 import dev.campusrun.core.policy.LatLng
 import dev.campusrun.core.policy.RunPolicy
 import dev.campusrun.core.session.Token
+import dev.campusrun.core.session.TokenStore
 import dev.campusrun.core.upload.RunRecord
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -26,7 +27,7 @@ class HomeViewModelTest {
 
     @Test
     fun `history empty - empty history shows the empty-state copy`() {
-        val vm = HomeViewModel(FakeHomeData(policy(), record = null), TOKEN, CURRENT_VERSION, DIRECT)
+        val vm = HomeViewModel(FakeHomeData(policy(), record = null), TOKEN, CURRENT_VERSION, DIRECT, FakeSecureStore())
 
         vm.refresh()
 
@@ -40,7 +41,7 @@ class HomeViewModelTest {
     @Test
     fun `history present - progress shows distance and validity`() {
         val record = RunRecord(id = "9001", distanceM = 2030, valid = true)
-        val vm = HomeViewModel(FakeHomeData(policy(), record), TOKEN, CURRENT_VERSION, DIRECT)
+        val vm = HomeViewModel(FakeHomeData(policy(), record), TOKEN, CURRENT_VERSION, DIRECT, FakeSecureStore())
 
         vm.refresh()
 
@@ -50,7 +51,7 @@ class HomeViewModelTest {
 
     @Test
     fun `update required - version check raises the prompt state`() {
-        val vm = HomeViewModel(FakeHomeData(policy(), null), TOKEN, CURRENT_VERSION, DIRECT)
+        val vm = HomeViewModel(FakeHomeData(policy(), null), TOKEN, CURRENT_VERSION, DIRECT, FakeSecureStore())
 
         vm.onVersionCheck(
             RemoteVersionInfo(
@@ -76,7 +77,7 @@ class HomeViewModelTest {
     @Test
     fun `update required - prompt carries the first apk mirror url`() {
         val mirror = "https://example.invalid/releases/v9.apk"
-        val vm = HomeViewModel(FakeHomeData(policy(), null), TOKEN, CURRENT_VERSION, DIRECT)
+        val vm = HomeViewModel(FakeHomeData(policy(), null), TOKEN, CURRENT_VERSION, DIRECT, FakeSecureStore())
 
         vm.onVersionCheck(
             RemoteVersionInfo(
@@ -95,7 +96,7 @@ class HomeViewModelTest {
 
     @Test
     fun `no update document - version check stays silent`() {
-        val vm = HomeViewModel(FakeHomeData(policy(), null), TOKEN, CURRENT_VERSION, DIRECT)
+        val vm = HomeViewModel(FakeHomeData(policy(), null), TOKEN, CURRENT_VERSION, DIRECT, FakeSecureStore())
         vm.refresh()
 
         vm.onVersionCheck(null) // every mirror failed → UpdateChecker returns null
@@ -106,7 +107,7 @@ class HomeViewModelTest {
 
     @Test
     fun `rules - school rule lines carry the run window and pace bounds`() {
-        val vm = HomeViewModel(FakeHomeData(policy(), null), TOKEN, CURRENT_VERSION, DIRECT)
+        val vm = HomeViewModel(FakeHomeData(policy(), null), TOKEN, CURRENT_VERSION, DIRECT, FakeSecureStore())
 
         vm.refresh()
 
@@ -114,6 +115,38 @@ class HomeViewModelTest {
         assertTrue(rules.contains("10:00-22:00"), "run window missing: $rules")
         assertTrue(rules.contains("3:00-10:00"), "pace window missing: $rules")
         assertTrue(rules.contains("2000"), "distance floor missing: $rules")
+    }
+
+    @Test
+    fun `logout - drops the session exactly once and flips to logged-out`() {
+        val store = FakeSecureStore()
+        val vm = HomeViewModel(FakeHomeData(policy(), null), TOKEN, CURRENT_VERSION, DIRECT, store)
+
+        vm.logout()
+
+        assertTrue(vm.loggedOut, "logout must transition to the logged-out state")
+        assertEquals(1, store.clearCalls, "logout must clear the session exactly once")
+        assertEquals(0, store.sessionLeft, "the persisted session must be dropped")
+        assertEquals(
+            0,
+            store.identity.calls,
+            "device identity must survive logout — never re-derive the device id (spec §5.5-3)",
+        )
+    }
+
+    @Test
+    fun `logout - a second logout and a refresh after logout are no-ops`() {
+        val store = FakeSecureStore()
+        val vm = HomeViewModel(FakeHomeData(policy(), null), TOKEN, CURRENT_VERSION, DIRECT, store)
+        vm.refresh()
+
+        vm.logout()
+        vm.logout() // already logged out: must not clear again, must not crash
+        vm.refresh() // and the Home data load must stay parked
+
+        assertEquals(1, store.clearCalls, "the second logout must not clear again")
+        assertTrue(vm.loggedOut, "the logged-out state must stick")
+        assertFalse(vm.state.loading, "a refresh after logout must not restart the load")
     }
 
     /** Spec §5.5-6 display fixture — the live school's advertised rule (T2/T9 fixture). */
@@ -138,6 +171,47 @@ class HomeViewModelTest {
         override fun fetchPolicy(token: Token): RunPolicy = policy
 
         override fun latest(token: Token): RunRecord? = record
+    }
+
+    /**
+     * Mirrors [dev.campusrun.app.data.AndroidTokenStore]: one store holding the session
+     * keys AND the device-identity material, where [clear] drops only the session
+     * (spec §5.5-3 — logout must not re-derive the device id).
+     */
+    private class FakeSecureStore : TokenStore {
+        var clearCalls = 0
+        var sessionLeft = 1
+
+        val identity = FakeIdentityStore()
+
+        override fun save(t: Token) {
+            sessionLeft = 1
+        }
+
+        override fun load(): Token? = TOKEN.takeIf { sessionLeft == 1 }
+
+        override fun clear() {
+            clearCalls++
+            sessionLeft = 0
+        }
+    }
+
+    /** Identity surface (salt + snapshot) — the logout path must never reach it. */
+    private class FakeIdentityStore {
+        var calls = 0
+
+        fun deviceSalt(): ByteArray {
+            calls++
+            return ByteArray(16)
+        }
+
+        fun saveDeviceIdentity() {
+            calls++
+        }
+
+        fun loadDeviceIdentity() {
+            calls++
+        }
     }
 
     private companion object {

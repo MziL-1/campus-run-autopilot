@@ -142,6 +142,17 @@ class LoginViewModel(
         }
     }
 
+    /**
+     * Back to [LoginState.Idle] after a logout: the persisted session was dropped, so
+     * the next screen must be the credential form — leaving the stale `Success` in
+     * place would re-render the logged-in placeholder and re-save the session.
+     * Only reachable from Home, where no login attempt is in flight.
+     */
+    fun resetToIdle() {
+        set(LoginState.Idle)
+        busy = false
+    }
+
     private fun set(next: LoginState) {
         state = next
     }

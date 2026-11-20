@@ -38,6 +38,7 @@ import dev.campusrun.core.diag.RedactedLog
 import dev.campusrun.core.identity.DeviceIdentity
 import dev.campusrun.core.session.SessionManager
 import dev.campusrun.core.session.Token
+import dev.campusrun.core.session.TokenStore
 import okhttp3.Call
 import okhttp3.Connection
 import okhttp3.EventListener
@@ -50,6 +51,8 @@ import java.net.InetAddress
  * graph (encrypted stores → params → ApiClient → SessionManager → Authenticator →
  * ViewModels), restores a persisted session on cold start, runs the startup update check,
  * and hosts 登录 → 首页 → 一键跑 → 进度/历史 → 导出诊断 behind one Compose `Route` state.
+ * Logout (spec §5.5-3) drops the session back through [SessionManager] and returns to
+ * the login screen without touching the device identity.
  */
 class MainActivity : ComponentActivity() {
 
@@ -121,6 +124,17 @@ class MainActivity : ComponentActivity() {
         val session = SessionManager(api, tokenStore)
         val restored: Token? = session.restore()
 
+        // Logout seam for Home (spec §5.5-3): core's session-only [TokenStore] contract —
+        // HomeViewModel can only call clear(), so the device-identity salt/snapshot, the
+        // install keys and ParamsStore are unreachable from the logout path. clear() routes
+        // through [SessionManager] so the long-lived ApiClient drops its credentials
+        // together with the persisted token; save/load stay the real store's.
+        val logoutStore = object : TokenStore {
+            override fun save(t: Token) = tokenStore.save(t)
+            override fun load(): Token? = tokenStore.load()
+            override fun clear() = session.clear()
+        }
+
         val vm = LoginViewModel(ApiAuthenticator(api, deviceModel = deviceModel, osVersion = osVersion))
 
         // Diagnostics log (spec §6.3): in-memory, redacted at write time; the export screen
@@ -187,7 +201,12 @@ class MainActivity : ComponentActivity() {
                         // Per-session VMs: Home loads rules/progress, Run owns the one-shot
                         // pipeline (both over the same ApiClient built above).
                         val homeVm = remember(token) {
-                            HomeViewModel(CoreHomeData(api), token, currentVersionCode)
+                            HomeViewModel(
+                                CoreHomeData(api),
+                                token,
+                                currentVersionCode,
+                                tokenStore = logoutStore,
+                            )
                         }
                         val runVm = remember(token) {
                             RunViewModel(
@@ -201,6 +220,17 @@ class MainActivity : ComponentActivity() {
                         }
                         LaunchedEffect(updateInfo.value) {
                             updateInfo.value?.let(homeVm::onVersionCheck)
+                        }
+                        // Logout: the VM dropped the session — return to the login screen
+                        // in Idle. LoginViewModel still holds the stale Success, which
+                        // would re-render the logged-in placeholder and re-save the
+                        // session, so it must be reset before navigating.
+                        LaunchedEffect(homeVm.loggedOut) {
+                            if (homeVm.loggedOut) {
+                                vm.resetToIdle()
+                                tokenState = null
+                                route = Route.HOME
+                            }
                         }
                         when (route) {
                             Route.HOME -> HomeScreen(

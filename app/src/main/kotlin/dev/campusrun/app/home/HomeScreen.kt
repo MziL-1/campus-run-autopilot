@@ -19,6 +19,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
@@ -29,7 +33,8 @@ import androidx.compose.ui.unit.dp
  * current progress from [HomeViewModel] (visible so users judge for themselves), the
  * first-run risk notice (incl. the ≤3-device red line, spec §5.5-3), navigation into the
  * one-shot run and the diagnostics export, the non-blocking update prompt raised by the
- * startup `version.json` check, and the spec §7 About surface.
+ * startup `version.json` check, and the spec §7 About surface carrying the
+ * confirm-guarded logout action.
  */
 @Composable
 fun HomeScreen(
@@ -40,6 +45,30 @@ fun HomeScreen(
     LaunchedEffect(Unit) { vm.refresh() }
     val state = vm.state
     val clipboard = LocalClipboardManager.current
+
+    // 退出登录 (spec §5.5-3): confirm first, then [HomeViewModel.logout] drops the
+    // session — [MainActivity] observes `loggedOut` and returns to the login screen.
+    var confirmLogout by remember { mutableStateOf(false) }
+    if (confirmLogout) {
+        AlertDialog(
+            onDismissRequest = { confirmLogout = false },
+            title = { Text("退出登录") },
+            text = {
+                Text("将清除本机保存的登录会话，下次需重新登录。设备标识不受影响。")
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmLogout = false
+                        vm.logout()
+                    },
+                ) { Text("退出") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmLogout = false }) { Text("取消") }
+            },
+        )
+    }
 
     vm.updatePrompt?.let { prompt ->
         // Non-blocking (spec G4/R5): a dismissible dialog — the app keeps working without updating.
@@ -179,6 +208,15 @@ fun HomeScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                Spacer(Modifier.height(8.dp))
+                // 退出登录: small, right-aligned action inside the About card — keeps the
+                // main screen focused while remaining one tap away.
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    TextButton(onClick = { confirmLogout = true }) { Text("退出登录") }
+                }
             }
         }
     }

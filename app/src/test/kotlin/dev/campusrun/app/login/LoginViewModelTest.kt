@@ -70,6 +70,27 @@ class LoginViewModelTest {
         assertFalse(state.message.contains(password), "password leaked into Error: ${state.message}")
     }
 
+    @Test
+    fun `resetToIdle - logout returns a logged-in machine to the credential form`() {
+        val token = Token(value = "tok-3", uid = "10000001", unid = "90001", expiresAtMs = null)
+        val fake = object : Authenticator {
+            override fun login(phone: String, password: String, captcha: CaptchaHandler): Token {
+                captcha.skip()
+                return token
+            }
+        }
+        val vm = LoginViewModel(fake, DIRECT)
+
+        vm.submit("10086000000", "hunter2")
+        assertEquals(LoginState.Success(token), vm.state)
+
+        vm.resetToIdle()
+        vm.resetToIdle() // already idle: second reset must be a no-op, not a crash
+
+        assertEquals(LoginState.Idle, vm.state, "logout must return the login screen to Idle")
+        assertFalse(vm.busy, "a logged-out machine must not be busy")
+    }
+
     /** Polls [LoginViewModel.state] until [predicate] holds; fails the test on timeout. */
     private fun LoginViewModel.await(
         timeoutMs: Long = 5_000,

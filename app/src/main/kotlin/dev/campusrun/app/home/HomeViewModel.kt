@@ -10,6 +10,7 @@ import dev.campusrun.core.diag.RedactedLog
 import dev.campusrun.core.policy.PolicyClient
 import dev.campusrun.core.policy.RunPolicy
 import dev.campusrun.core.session.Token
+import dev.campusrun.core.session.TokenStore
 import dev.campusrun.core.upload.HistoryClient
 import dev.campusrun.core.upload.RunRecord
 import java.util.concurrent.Executor
@@ -47,6 +48,10 @@ data class UpdatePrompt(val message: String, val downloadUrl: String?)
  * turns the startup `version.json` result ([onVersionCheck]) into a **non-blocking**
  * prompt state — `null` document (every mirror failed) stays silent, `minApkVersionCode >
  * current` raises [updatePrompt] (spec G4/R5, ruling: fail-silent + dismissible).
+ *
+ * [logout] is the session-drop seam (spec §5.5-3): it reaches ONLY core's session-key
+ * [TokenStore] contract, so device identity, install keys and ParamsStore are
+ * structurally out of reach — a logout can never re-derive the device id.
  */
 class HomeViewModel(
     private val data: HomeData,
@@ -55,9 +60,17 @@ class HomeViewModel(
     private val executor: Executor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "home-loader").apply { isDaemon = true }
     },
+    private val tokenStore: TokenStore,
 ) {
 
     var state: HomeUiState by mutableStateOf(HomeUiState())
+        private set
+
+    /**
+     * True once [logout] dropped the persisted session — [MainActivity] navigates back
+     * to the login screen on it. Idempotent: further logouts/refreshes are no-ops.
+     */
+    var loggedOut: Boolean by mutableStateOf(false)
         private set
 
     /** Update-required prompt (提示态); `null` = no prompt. Dismissible, never blocking. */
@@ -72,6 +85,7 @@ class HomeViewModel(
 
     /** Loads rules + progress (brief: 首页显示本校规则与进度). Safe to call repeatedly. */
     fun refresh() {
+        if (loggedOut) return // already logged out: the Home is gone, nothing to load.
         state = state.copy(loading = true, error = null)
         executor.execute {
             try {
@@ -103,6 +117,18 @@ class HomeViewModel(
 
     fun dismissUpdatePrompt() {
         updatePrompt = null
+    }
+
+    /**
+     * Logout (spec §5.5-3): drops the persisted session through core's [TokenStore] —
+     * the session-keys-only contract — so the device-identity salt/snapshot, the install
+     * keys and ParamsStore stay untouched and the device id never churns. Idempotent:
+     * a second call while [loggedOut] is a no-op (no double clear, no crash).
+     */
+    fun logout() {
+        if (loggedOut) return
+        tokenStore.clear()
+        loggedOut = true
     }
 
     /** Spec §5.5-6 规则卡: 次数 / 里程 / 配速 / 时段 (+必经点), "未公布" when not advertised. */
