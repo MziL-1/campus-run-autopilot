@@ -3,6 +3,7 @@ package dev.campusrun.app.run
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import dev.campusrun.app.session.SessionEpoch
 import dev.campusrun.core.api.ApiClient
 import dev.campusrun.core.config.ProtocolParams
 import dev.campusrun.core.crypto.NetSecKit
@@ -130,8 +131,13 @@ class RunViewModel(
 
     /** The brief's `run` pipeline; see the class KDoc for the gate ordering. */
     private fun pipeline(distanceM: Int, durationSec: Int) {
+        // Fix (invalidate in-flight work on logout): captured at task start; every
+        // token-taking leg below re-compares it, so a pipeline that outlived its logout
+        // can neither re-install the dead token into the shared ApiClient nor submit.
+        val startEpoch = SessionEpoch.current
         set(RunState.Running)
         try {
+            if (abortIfLoggedOut(startEpoch, "未获取规则")) return
             val seed = Random.nextLong()
             val skewMs = stages.syncSkewMs()
             log("sync: server clock skew $skewMs ms")
@@ -219,20 +225,26 @@ class RunViewModel(
             // ── Cross-session 每日 ≤1 (spec §5.5-4 #1): the newest history record must not
             // already be today's. Read-only, before any upload — a process restart can no
             // longer re-enable a second run of the same day.
+            if (abortIfLoggedOut(startEpoch, "未核对历史")) return
             dailySelfLimitRefusal(stages.latestHistory(token), System.currentTimeMillis() + skewMs)
                 ?.let { message ->
                     fail(message)
                     return
                 }
 
+            if (abortIfLoggedOut(startEpoch, "未上传")) return
             submissionAttempted = true
             val handle = stages.upload(token, track)
             log("upload: OBS push accepted, uuid ${handle.uuid}")
 
+            // The record is created here: a logout that landed while the upload was on
+            // the wire must still stop the save/record leg (the submission stays inert).
+            if (abortIfLoggedOut(startEpoch, "未保存记录")) return
             val rrid = stages.settle(policy, track, handle)
             log("settle: save/record accepted, rrid=$rrid")
 
             if (settleWaitMs > 0) Thread.sleep(settleWaitMs) // upstream gives the store room
+            if (abortIfLoggedOut(startEpoch, "未回查")) return
             val record = stages.latestHistory(token)
             log(
                 "verify: " + (record?.let { "id=${it.id}, ${it.distanceM} m, valid=${it.valid}" } ?: "no record returned"),
@@ -252,6 +264,18 @@ class RunViewModel(
         val message = "提交成功：${record.distanceM} m，达标（记录 id=${record.id}）"
         RecentResults.add("一键跑：$message")
         set(RunState.Success(record.distanceM, message))
+    }
+
+    /**
+     * Fix (invalidate in-flight work on logout): true when [SessionEpoch] moved past the
+     * [startEpoch] captured at pipeline start — i.e. this pipeline outlived its own
+     * logout. The caller aborts with a terminal non-success state ([at] names the leg
+     * that did NOT run), so no dead-token re-install and no submission can follow.
+     */
+    private fun abortIfLoggedOut(startEpoch: Long, at: String): Boolean {
+        if (SessionEpoch.current == startEpoch) return false
+        fail("已退出登录，一键跑已中止（$at）")
+        return true
     }
 
     /** Terminal refusal/failure: records the outcome for the diagnostic export, then shows it. */

@@ -89,8 +89,15 @@ class HomeViewModel(
         state = state.copy(loading = true, error = null)
         executor.execute {
             try {
+                // Fix (invalidate in-flight work on logout): every token-taking leg
+                // re-checks — PolicyClient/HistoryClient re-install their token into the
+                // shared ApiClient at leg entry, so a leg started after the drop would
+                // resurrect the cleared credentials.
+                if (loggedOut) return@execute
                 val policy = data.fetchPolicy(token)
+                if (loggedOut) return@execute
                 val record = data.latest(token)
+                if (loggedOut) return@execute
                 state = HomeUiState(
                     loading = false,
                     rules = ruleLines(policy),
@@ -124,11 +131,15 @@ class HomeViewModel(
      * the session-keys-only contract — so the device-identity salt/snapshot, the install
      * keys and ParamsStore stay untouched and the device id never churns. Idempotent:
      * a second call while [loggedOut] is a no-op (no double clear, no crash).
+     *
+     * The [loggedOut] signal is raised BEFORE the drop (fix: invalidate in-flight work
+     * on logout): the refresh worker checks it before each token-taking leg, so no leg
+     * can start once the session is being cleared.
      */
     fun logout() {
         if (loggedOut) return
-        tokenStore.clear()
         loggedOut = true
+        tokenStore.clear()
     }
 
     /** Spec §5.5-6 规则卡: 次数 / 里程 / 配速 / 时段 (+必经点), "未公布" when not advertised. */

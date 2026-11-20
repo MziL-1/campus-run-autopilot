@@ -1,5 +1,6 @@
 package dev.campusrun.app.run
 
+import dev.campusrun.app.session.SessionEpoch
 import dev.campusrun.core.policy.RunPolicy
 import dev.campusrun.core.policy.RunPolicyValidator
 import dev.campusrun.core.session.Token
@@ -10,7 +11,10 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.time.LocalDate
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /**
  * One-shot run pipeline tests (brief Step 1):
@@ -150,6 +154,60 @@ class RunViewModelTest {
         assertEquals(1, fake.uploadCalls, "the self-limit must block before any second upload")
     }
 
+    @Test
+    fun `logout during run - the pipeline aborts before upload`() {
+        // Gated history read: the pipeline is mid-leg when the logout seam lands.
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val fake = FakeRunStages(
+            policy = policy(),
+            track = track(distanceM = 2030, durationSec = 760),
+            // Past-dated so the cross-session gate would allow the upload — the abort
+            // must come from the logout invalidation alone.
+            record = RunRecord(id = "9005", distanceM = 2030, valid = true, startTimeMs = PAST_MS),
+            beforeLatestHistory = {
+                entered.countDown()
+                release.await(5, TimeUnit.SECONDS)
+            },
+        )
+        val vm = RunViewModel(fake, TOKEN, BACKGROUND, settleWaitMs = 0)
+
+        vm.startRun(distanceM = 2030, durationSec = 760)
+        assertTrue(entered.await(5, TimeUnit.SECONDS), "pipeline must reach the history read")
+        SessionEpoch.bump() // the logout seam (MainActivity's clear) lands mid-run
+        release.countDown()
+
+        val deadline = System.currentTimeMillis() + 5_000
+        while (System.currentTimeMillis() < deadline && vm.state !is RunState.Error) {
+            Thread.sleep(5)
+        }
+        val state = vm.state
+        assertTrue(state is RunState.Error, "a logged-out pipeline must end non-success, got $state")
+        assertTrue(
+            (state as RunState.Error).message.contains("已退出登录"),
+            "the abort must name the logout: ${state.message}",
+        )
+        assertEquals(0, fake.uploadCalls, "upload must NEVER be called after logout")
+    }
+
+    @Test
+    fun `epoch capture - a run started after a logout bump still proceeds`() {
+        // Capture-at-start semantics: only work that outlived ITS OWN logout dies, so a
+        // fresh session (new pipeline, new capture) is not permanently invalidated.
+        SessionEpoch.bump()
+        val fake = FakeRunStages(
+            policy = policy(),
+            track = track(distanceM = 2030, durationSec = 760),
+            record = RunRecord(id = "9006", distanceM = 2030, valid = true, startTimeMs = PAST_MS),
+        )
+        val vm = RunViewModel(fake, TOKEN, DIRECT, settleWaitMs = 0)
+
+        vm.startRun(distanceM = 2030, durationSec = 760)
+
+        assertTrue(vm.state is RunState.Success, "a post-bump run must proceed, got ${vm.state}")
+        assertEquals(1, fake.uploadCalls, "the fresh pipeline must upload exactly once")
+    }
+
     /** No advertised window (both hours 0) so the validator's wall-clock check cannot flake. */
     private fun policy() = RunPolicy(
         requiredPoints = emptyList(),
@@ -185,6 +243,8 @@ class RunViewModelTest {
         private val policy: RunPolicy,
         private val track: List<TrackPoint>,
         private val record: RunRecord? = null,
+        /** Test gate run at the top of every [latestHistory] leg (in-flight window). */
+        private val beforeLatestHistory: (() -> Unit)? = null,
     ) : RunStages {
         var uploadCalls = 0
             private set
@@ -208,7 +268,10 @@ class RunViewModelTest {
 
         override fun settle(policy: RunPolicy, track: List<TrackPoint>, handle: UploadHandle): String = "9001"
 
-        override fun latestHistory(token: Token): RunRecord? = record
+        override fun latestHistory(token: Token): RunRecord? {
+            beforeLatestHistory?.invoke()
+            return record
+        }
     }
 
     private companion object {
@@ -217,6 +280,11 @@ class RunViewModelTest {
 
         /** Runs the pipeline inline on the calling thread — deterministic legs. */
         val DIRECT = Executor { it.run() }
+
+        /** Real worker thread for the in-flight-logout test (the gate blocks the runner). */
+        val BACKGROUND = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "run-test").apply { isDaemon = true }
+        }
 
         const val METRES_PER_DEGREE_LNG = 111_194.9266
 

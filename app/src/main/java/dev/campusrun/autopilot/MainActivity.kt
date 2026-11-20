@@ -29,6 +29,7 @@ import dev.campusrun.app.login.LoginViewModel
 import dev.campusrun.app.run.CoreRunStages
 import dev.campusrun.app.run.RunScreen
 import dev.campusrun.app.run.RunViewModel
+import dev.campusrun.app.session.SessionEpoch
 import dev.campusrun.core.api.ApiClient
 import dev.campusrun.core.config.ParamsStore
 import dev.campusrun.core.config.ProtocolParams
@@ -129,10 +130,16 @@ class MainActivity : ComponentActivity() {
         // install keys and ParamsStore are unreachable from the logout path. clear() routes
         // through [SessionManager] so the long-lived ApiClient drops its credentials
         // together with the persisted token; save/load stay the real store's.
+        // Fix (invalidate in-flight work on logout): [SessionEpoch.bump] runs FIRST, so
+        // the in-flight Home refresh and run pipeline (daemon threads, not cancelled by
+        // composition disposal) abort before they can re-install the dead token or submit.
         val logoutStore = object : TokenStore {
             override fun save(t: Token) = tokenStore.save(t)
             override fun load(): Token? = tokenStore.load()
-            override fun clear() = session.clear()
+            override fun clear() {
+                SessionEpoch.bump()
+                session.clear()
+            }
         }
 
         val vm = LoginViewModel(ApiAuthenticator(api, deviceModel = deviceModel, osVersion = osVersion))

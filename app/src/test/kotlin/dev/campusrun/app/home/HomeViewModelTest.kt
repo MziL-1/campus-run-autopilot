@@ -12,7 +12,10 @@ import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /**
  * Home (rules / progress / history) tests — brief Step 1:
@@ -149,6 +152,61 @@ class HomeViewModelTest {
         assertFalse(vm.state.loading, "a refresh after logout must not restart the load")
     }
 
+    @Test
+    fun `logout during refresh - in-flight legs never re-install the cleared credentials`() {
+        // Fake ApiClient seam: the core clients (PolicyClient.kt:34 / HistoryClient.kt:57)
+        // re-install their token into the shared ApiClient at the top of every leg, and
+        // SessionManager.clear() nulls them — so "credentials stay null after logout" is
+        // exactly the reviewer's race assertion.
+        val api = FakeApiClient()
+        api.setCredentials(TOKEN.uid, TOKEN.value) // live session before the logout
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val executor = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "home-test").apply { isDaemon = true }
+        }
+        val store = object : TokenStore {
+            var clears = 0
+            override fun save(t: Token) = Unit
+            override fun load(): Token? = null
+            override fun clear() {
+                clears += 1
+                api.setCredentials(null, null) // models SessionManager.clear()
+            }
+        }
+        val data = object : HomeData {
+            var latestCalls = 0
+
+            override fun fetchPolicy(token: Token): RunPolicy {
+                api.setCredentials(token.uid, token.value) // mimics PolicyClient (entry)
+                entered.countDown()
+                release.await(5, TimeUnit.SECONDS) // in-flight window: logout lands here
+                return policy()
+            }
+
+            override fun latest(token: Token): RunRecord? {
+                api.setCredentials(token.uid, token.value) // mimics HistoryClient (entry)
+                latestCalls += 1
+                return null
+            }
+        }
+        val vm = HomeViewModel(data, TOKEN, CURRENT_VERSION, executor, store)
+
+        vm.refresh()
+        assertTrue(entered.await(5, TimeUnit.SECONDS), "refresh must reach the first leg")
+        vm.logout() // session dropped while the first leg is on the wire
+        release.countDown()
+
+        // Single-thread executor: a follower task runs only after the refresh task ended.
+        val drained = CountDownLatch(1)
+        executor.execute { drained.countDown() }
+        assertTrue(drained.await(5, TimeUnit.SECONDS), "the refresh worker must finish")
+
+        assertEquals(1, store.clears, "logout must clear the session exactly once")
+        assertNull(api.uid, "no in-flight leg may re-install the cleared credentials")
+        assertEquals(0, data.latestCalls, "the second token-taking leg must not start after logout")
+    }
+
     /** Spec §5.5-6 display fixture — the live school's advertised rule (T2/T9 fixture). */
     private fun policy() = RunPolicy(
         requiredPoints = listOf(LatLng(34.7546, 113.6208)),
@@ -211,6 +269,16 @@ class HomeViewModelTest {
 
         fun loadDeviceIdentity() {
             calls++
+        }
+    }
+
+    /** Stand-in for core's [dev.campusrun.core.api.ApiClient] credential snapshot. */
+    private class FakeApiClient {
+        var uid: String? = null
+            private set
+
+        fun setCredentials(uid: String?, token: String?) {
+            this.uid = uid
         }
     }
 
