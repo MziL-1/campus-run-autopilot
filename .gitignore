@@ -21,6 +21,11 @@ captures/
 *.apk
 *.aab
 
+# Release signing (NEVER commit)
+keystore.properties
+*.jks
+*.keystore
+
 # Upstream source snapshots / scratch reference material (never committed)
 reference/
 

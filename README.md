@@ -31,7 +31,29 @@ OkHttp 4.12.0 · JUnit 5.10.2。`minSdk 26`，`targetSdk`/`compileSdk` 35，
 ```bash
 ./gradlew test              # 全部模块单元测试
 ./gradlew :app:assembleDebug # 产出 app/build/outputs/apk/debug/app-debug.apk
+./gradlew assembleRelease    # 产出 app/build/outputs/apk/release/app-release.apk（需 keystore.properties）
 ```
+
+## 发版流程
+
+1. **构建签名 release APK**：`./gradlew assembleRelease`
+   （读取根目录 `keystore.properties`；文件缺失时任务会明确报错，不会产出未签名包）。
+   用 `apksigner verify --print-certs` 验证签名。
+2. **发布**：`gh release create v<版本号> app/build/outputs/apk/release/app-release.apk --title v<版本号>`
+3. **更新热更配置** `config/version.json`：bump `minApkVersionCode`（设为新 APK 的
+   `versionCode`）与 `apkMirrors`（指向本次 release 资产 URL），按需 bump `configVersion`。
+4. **提交并推送**配置，用户端启动时的更新检查即会弹出下载提示。
+
+### ⚠️ Keystore 备份警告
+
+- `keystore.properties` 与 `campusrun-release.jks` **均已被 gitignore，绝不可提交**；
+  密码只交付用户线下保管。
+- **丢失 keystore = 已安装用户永远无法升级**：Android 只接受同一签名的覆盖安装。
+  请将 `.jks` + 密码备份到安全的离线位置（密码管理器 / 纸质记录）。
+- 当前手机上的 debug 安装沿用 debug keystore（本阶段不切换签名，避免强制重装）；
+  **第一个公开 release 才会确立 release-keystore 签名谱系** —— 覆盖安装 debug 版的用户
+  需要一次性卸载重装（登录态随 EncryptedSharedPreferences 一起清除，需重新滑块登录），
+  此后所有 release 之间均可直接升级。
 
 ## 上游致谢与许可证（MIT）
 
