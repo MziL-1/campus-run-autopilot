@@ -23,7 +23,7 @@
         "selDistance=2000",
         "selRunTime=0",
         "selectedUnid=55001",
-        "speed=2600",
+        "speed=6333",
         "sportType=1",
         "startTime=1750123456000",
         "status=1",
@@ -41,7 +41,7 @@
         "validDis=2000",
         "validTime=760"
       ],
-      "signature": "539ceca64a4bca0ae154087ada701285"
+      "signature": "092acbc0e97c616baeda79207a5e38c4"
     },
     {
       "name": "31-fields-incomplete",
@@ -62,7 +62,7 @@
         "selDistance=3000",
         "selRunTime=0",
         "selectedUnid=55001",
-        "speed=2600",
+        "speed=5891",
         "sportType=1",
         "startTime=1750123456000",
         "status=1",
@@ -80,7 +80,7 @@
         "validDis=1900",
         "validTime=760"
       ],
-      "signature": "b43adc90e564f1addb0c24f56f0ac99c"
+      "signature": "60f28b88a84ad591b11dad9d0eeeb2f8"
     },
     {
       "name": "mixed-case-keys-custom-salt",
@@ -115,7 +115,7 @@
         "selDistance=2000",
         "selRunTime=0",
         "selectedUnid=55001",
-        "speed=2742",
+        "speed=6078",
         "sportType=1",
         "startTime=1750123456000",
         "status=1",
@@ -133,8 +133,8 @@
         "validDis=2084",
         "validTime=760"
       ],
-      "signature": "338eef3f4f46a4a1520e7e80da08e680",
-      "originalSign": "address=&avgPower=150&avgStepFreq=156&calorie=135&complete=true&errorCode=0&faceCheck=0&geeToken=&getPrize=false&goalId=null&policy=1&selDistance=2000&selRunTime=0&selectedUnid=55001&speed=2742&sportType=1&startTime=1750123456000&status=1&stopTime=1750124216000&themeId=0&totalAscent=0&totalDis=2084&totalSteps=1976&totalTime=760&uid=90001&unCompleteReason=0&unauthorized=0&useMobilityTools=0&uuid=0b9c2f8e-4b6a-4f1e-9d2c-7a5e3f1b8c4d&validDis=2084&validTime=760",
+      "signature": "4975d6449d77ece1dcda37f7dbffe703",
+      "originalSign": "address=&avgPower=150&avgStepFreq=156&calorie=135&complete=true&errorCode=0&faceCheck=0&geeToken=&getPrize=false&goalId=null&policy=1&selDistance=2000&selRunTime=0&selectedUnid=55001&speed=6078&sportType=1&startTime=1750123456000&status=1&stopTime=1750124216000&themeId=0&totalAscent=0&totalDis=2084&totalSteps=1976&totalTime=760&uid=90001&unCompleteReason=0&unauthorized=0&useMobilityTools=0&uuid=0b9c2f8e-4b6a-4f1e-9d2c-7a5e3f1b8c4d&validDis=2084&validTime=760",
       "inputs": {
         "track": {
           "durationSec": 760,
@@ -165,7 +165,7 @@
           "totalDis": 2084,
           "totalSteps": 1976,
           "avgStepFreq": 156,
-          "speed": 2742,
+          "speed": 6078,
           "complete": true,
           "unCompleteReason": 0
         }

@@ -34,6 +34,13 @@ class SettlementTest {
 
     private val golden: JsonObject = settlementGolden()
 
+    /**
+     * Longitude step (degrees) of the canonical 2030 m / 760 s straight track used by the
+     * pace regression test: 760 haversine segments at lat 34.705 sum to exactly 2030 m
+     * (`2 * 6371000 * atan2(sqrt(h), sqrt(1-h))` per segment, h = cos²lat · sin²(Δλ/2)).
+     */
+    private val canonicalLngStep = 2.9219703506642138e-05
+
     @Test
     fun `buildRequest pins the 31 settlement fields against the generator golden`() {
         val body = parseBody(Settlement.buildRequest(policy(), track(), handle(), params()))
@@ -93,6 +100,50 @@ class SettlementTest {
         assertEquals(golden.getValue("lastSpeedBucket").jsonObject, speed.last().jsonObject)
         assertEquals(golden.getValue("firstStepBucket").jsonObject, steps.first().jsonObject)
         assertEquals(golden.getValue("lastStepBucket").jsonObject, steps.last().jsonObject)
+    }
+
+    /**
+     * Regression for the 不达标 defect (.superpowers/sdd/pace-diagnosis.md): the platform
+     * reads the wire `speed` as 平均配速 — it renders `speed / 1000` in 分/km and checks it
+     * against `speedTop 3.0 … speedBottom 10.0` (= [RunPolicy.paceMinSecPerKm] …
+     * [RunPolicy.paceMaxSecPerKm] / 60). Upstream `builder.py:162` computes `speed` as
+     * average SPEED (m/s ×1000) → 2671 → 2.671 分/km < 3.0 → 配速 rule fails → 成绩无效
+     * for every real record, while the true pace 6'14" would pass.
+     */
+    @Test
+    fun `speed field is pace in min per km so the platform pace window accepts it`() {
+        // Canonical live run shape: the default 2030 m / 760 s track the three不达标
+        // records used (RunScreen default; diagnosis §2). Straight east line whose
+        // 760 haversine segments of canonicalLngStep degrees sum to exactly 2030 m.
+        val track = List(761) { i ->
+            TrackPoint(34.705, 113.7 + i * canonicalLngStep, i, 2.73, 156.0)
+        }
+        val startMs = 1_750_123_456_000L
+        val canonicalHandle = UploadHandle(
+            uid = "90001",
+            unid = "55001",
+            uuid = "0b9c2f8e-4b6a-4f1e-9d2c-7a5e3f1b8c4d",
+            startTimeMs = startMs,
+            stopTimeMs = startMs + 760_000L,
+        )
+        val policy = paceWindowPolicy()
+
+        val totals = deriveTotals(track)
+        assertEquals(2030, totals.totalDis, "canonical track must measure exactly 2030 m")
+        assertEquals(760, totals.durationSec, "canonical track must span 760 s")
+
+        val body = parseBody(Settlement.buildRequest(policy, track, canonicalHandle, params()))
+        val speed = body.getValue("speed").jsonPrimitive.int
+
+        // Platform window in the same units the wire value is read in: 分/km.
+        val paceWindowMinPerKm = policy.paceMinSecPerKm / 60.0..policy.paceMaxSecPerKm / 60.0
+        assertTrue(
+            speed / 1000.0 in paceWindowMinPerKm,
+            "speed=$speed renders as 平均配速 ${speed / 1000.0} 分/km, outside the platform " +
+                "window $paceWindowMinPerKm 分/km — the 配速 rule would fail (不达标)",
+        )
+        // 760 s / 2030 m = 6.240 分/km = 6'14" → 6240 (old speed formula emitted 2671 here).
+        assertEquals(6240, speed, "pace must be min/km x1000 for the canonical 2030 m / 760 s run")
     }
 
     @Test
@@ -215,6 +266,13 @@ class SettlementTest {
             faceWindow = null,
         )
     }
+
+    /**
+     * The live 配速 window: `speedTop 3.0` / `speedBottom 10.0` 分/km from
+     * `run_mode_policy.json` mapped to 180…600 s/km exactly like `PolicyClient`.
+     */
+    private fun paceWindowPolicy(): RunPolicy =
+        policy().copy(paceMinSecPerKm = 180, paceMaxSecPerKm = 600)
 
     private fun params(): ProtocolParams = ProtocolParams(
         aesKey = "0123456789abcdef".toByteArray(),

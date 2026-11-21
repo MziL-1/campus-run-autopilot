@@ -33,17 +33,30 @@ import kotlin.math.floor
  * as the literal string `"null"` (builder.py:177) while the body carries JSON `null`
  * (builder.py:237); the rendering helper reproduces exactly that.
  *
- * ### Field derivations (upstream formulas, unchanged)
+ * ### Field derivations (upstream formulas, unchanged — except `speed`, see below)
  *
  * ```text
  * durationSec = last.elapsedSec - first.elapsedSec      (1 Hz TrackPoint samples)
  * totalDis    = round(path length)                      (consistency.check_track meters)
  * totalSteps  = round(sum(stepRateHz * dt) / 60)        (stepRateHz is steps/MINUTE)
  * avgStepFreq = round(totalSteps * 60.0 / durationSec)  (builder.py:161)
- * speed       = round(totalDis / durationSec * 1000)    (builder.py:162)
+ * speed       = round(durationSec * 1e6 / (60 * totalDis))   PACE — DELIBERATE DEVIATION
  * complete    = totalDis >= selDistance && durationSec >= selRunTime (builder.py:159)
  * unCompleteReason = 0 if complete else 10              (builder.py:160)
  * ```
+ *
+ * ### Why `speed` deviates from upstream `builder.py:162`
+ *
+ * Upstream computes `speed = round(totalDis / durationSec * 1000)` — average SPEED in
+ * m/s ×1000 (2671 for the canonical 2030 m / 760 s run). The platform, however, consumes
+ * `speed` as **平均配速**: it renders `speed / 1000` in **min/km** (2671 → 2.671 → "2'40"")
+ * and validates that number against `speedTop 3.0 … speedBottom 10.0` 分/km
+ * (= `RunPolicy.paceMinSecPerKm … paceMaxSecPerKm` / 60). 2.671 < 3.0 ⇒ the 配速 rule
+ * fails ⇒ 成绩无效 on every real record, while the true pace 6'14"/km ∈ [3'00", 10'00"]
+ * passes. Full evidence chain: `.superpowers/sdd/pace-diagnosis.md` (root cause §3).
+ * Hence this build emits **pace in min/km ×1000** instead — a deliberate, documented
+ * divergence from `builder.py:162`, not a porting slip; every other field stays
+ * byte-identical to upstream.
  *
  * `stopTime - startTime == durationSec * 1000` is enforced like upstream
  * `consistency.validate_totals` (the same check [UploadHandle] already guarantees).
@@ -109,7 +122,7 @@ object Settlement {
             "selDistance" to JsonPrimitive(SEL_DISTANCE_M),
             "selRunTime" to JsonPrimitive(SEL_RUN_TIME_S),
             "selectedUnid" to JsonPrimitive(unid),
-            "speed" to JsonPrimitive(averageSpeedMilli(totals)),
+            "speed" to JsonPrimitive(averagePaceMilli(totals)), // platform reads it as 配速 (min/km x1000)
             "sportType" to JsonPrimitive(SPORT_TYPE),
             "startTime" to JsonPrimitive(startTimeMs),
             "status" to JsonPrimitive(1),
@@ -164,8 +177,18 @@ object Settlement {
     private fun avgStepFreq(totals: TrackTotals): Int =
         pyRound(totals.totalSteps * 60.0 / totals.durationSec).toInt()
 
-    private fun averageSpeedMilli(totals: TrackTotals): Int =
-        pyRound(totals.totalDis.toDouble() / totals.durationSec * 1000.0).toInt()
+    /**
+     * The `speed` sign/body field as the platform reads it: **average pace in min/km ×1000**
+     * (`pyRound(durationSec * 1_000_000 / (60 * totalDis))`, half-even like every other
+     * derivation here). 2030 m / 760 s → 6240 → 6.240 分/km → "6'14"", inside the
+     * `speedTop 3.0 … speedBottom 10.0` 分/km window.
+     *
+     * Deliberate deviation from upstream `builder.py:162` (average speed, m/s ×1000) —
+     * see the class KDoc and `.superpowers/sdd/pace-diagnosis.md`: the platform consumes
+     * `speed` as 配速, so upstream's formula makes every submission fail the 配速 rule.
+     */
+    private fun averagePaceMilli(totals: TrackTotals): Int =
+        pyRound(totals.durationSec * 1_000_000.0 / (60.0 * totals.totalDis)).toInt()
 }
 
 /** Derived run totals shared with the OBS payload ([RunUploader]). */

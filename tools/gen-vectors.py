@@ -40,10 +40,18 @@ The signature vectors (``vectors/sign.json``) come from the same unmodified tree
   pulls in the Python>=3.12-only ``client.py`` f-string) is never imported.
   The last case (``track-derived-760s``) is built from a *fixed synthetic track*
   through the same field derivations upstream ``build_submission_payload`` applies
-  (``avgStepFreq``/``speed``/``complete`` formulas, ``stop-start == duration*1000``
-  from ``consistency.validate_totals``), plus the ``fivePointJson`` envelope and the
+  (``avgStepFreq``/``complete`` formulas, ``stop-start == duration*1000`` from
+  ``consistency.validate_totals``), plus the ``fivePointJson`` envelope and the
   first/last 10 s buckets straight out of upstream ``time_buckets`` -- it is the
   golden Task 8's ``Settlement.buildRequest`` test reconstructs end to end.
+  **Exception: the ``speed`` field is NOT upstream's.** Upstream ``builder.py:162``
+  computes average *speed* (m/s x1000), but the platform consumes ``speed`` as
+  平均配速 (min/km x1000) and rejects anything outside ``speedTop 3.0`` ..
+  ``speedBottom 10.0`` 分/km, so upstream's value (2671 for the canonical 2030 m /
+  760 s run) fails the 配速 rule for every submission. Every settlement ``speed`` is
+  therefore overridden with the Kotlin port's pace formula *after* the upstream
+  derivations -- see ``.superpowers/sdd/pace-diagnosis.md`` (root cause §3) and the
+  comment on ``pace_milli`` below.
 
 Run: python tools/gen-vectors.py
 Out: core/src/test/resources/vectors/netsec.json
@@ -509,11 +517,28 @@ def settlement_case(builder, name, sign_map, salt=None):
     }
 
 
+def pace_milli(total_dis, duration_sec):
+    """Settlement ``speed`` as the platform reads it: average PACE in min/km x1000.
+
+    Deliberate deviation from upstream ``running/builder.py:162``
+    (``round(totalDis / duration * 1000)``, average speed in m/s x1000): the platform
+    renders ``speed / 1000`` as 平均配速 in 分/km and checks it against
+    ``speedTop 3.0`` .. ``speedBottom 10.0`` 分/km, so upstream's formula (2671 for
+    the canonical 2030 m / 760 s run -> 2.671 分/km < 3.0) fails the 配速 rule on
+    every record while the true pace 6.240 分/km passes. Evidence and the full
+    key-by-key analysis: ``.superpowers/sdd/pace-diagnosis.md`` (root cause §3).
+    The Kotlin port (``Settlement.averagePaceMilli``) uses the identical formula;
+    Python's ``round`` is half-even there too (``pyRound``).
+    """
+    return round(duration_sec * 1_000_000 / (60 * total_dis))
+
+
 def settlement_build_case(builder, consistency, models):
     """Track-derived settlement golden for Task 8's Settlement.buildRequest test.
 
     The fixed inputs below mirror the Kotlin ``SettlementTest`` fixture exactly; every
-    derived value follows upstream ``running/builder.py`` ``build_submission_payload``:
+    derived value follows upstream ``running/builder.py`` ``build_submission_payload``
+    (the ``speed`` bullet is the one documented exception):
 
     - ``totalDis``  = round(haversine path length of the fixed track) -- the Kotlin port
       derives the same number from ``Geo.pathLengthM`` (same radius, same formula).
@@ -521,7 +546,11 @@ def settlement_build_case(builder, consistency, models):
       steps-per-minute, so cadence*dt/60 is the step count of each 1 s interval
       (upstream's own ``avgStepFreq`` then confirms the unit: steps/min).
     - ``avgStepFreq`` = round(totalSteps * 60.0 / totalTime)   (builder.py:161)
-    - ``speed``       = round((totalDis / totalTime) * 1000)   (builder.py:162)
+    - ``speed``       = round(totalTime * 1e6 / (60 * totalDis)) -- PACE in min/km x1000.
+      DELIBERATE deviation from builder.py:162 (average speed m/s x1000): the platform
+      reads ``speed`` as 配速 and rejects it outside speedTop 3.0 .. speedBottom 10.0
+      分/km, so upstream's value would fail every submission. See
+      ``.superpowers/sdd/pace-diagnosis.md`` (root cause §3) and ``pace_milli``.
     - ``complete``/``unCompleteReason``                        (builder.py:159-160)
     - ``stop - start == duration * 1000`` is required by consistency.validate_totals:48,
       so the golden handle timestamps are pinned to the duration.
@@ -545,7 +574,10 @@ def settlement_build_case(builder, consistency, models):
     total_dis = round(path_m)
     total_steps = round(sum(p[4] * 1 for p in track[:duration]) / 60.0)
     avg_step_freq = round(total_steps * 60.0 / duration)
-    speed_val = round((total_dis / duration) * 1000)
+    # `speed` is the pace override (see pace_milli / module docstring), applied to the
+    # upstream-derived sign_map before compute_sport_signature, so signature and
+    # originalSign in the golden cover the pace value exactly as Settlement.kt emits it.
+    speed_val = pace_milli(total_dis, duration)
     complete = (total_dis >= sel_distance) and (duration >= sel_run_time)
     un_complete_reason = 0 if complete else 10
 
@@ -653,7 +685,12 @@ def settlement_cases(builder, consistency, models):
         "selDistance": 2000,
         "selRunTime": 0,
         "selectedUnid": 55001,
-        "speed": 2600,
+        # PACE (min/km x1000) via pace_milli, not upstream builder.py:162 average speed:
+        # the platform reads `speed` as 配速 and validates speedTop 3.0..speedBottom 10.0
+        # 分/km (.superpowers/sdd/pace-diagnosis.md). 2000 m / 760 s -> 6333 (6.333 分/km).
+        # These two cases are signer-only vectors, updated for semantic consistency so no
+        # golden in this repo still carries the rejected speed semantics.
+        "speed": pace_milli(2000, 760),
         "sportType": 1,
         "startTime": 1750123456000,
         "status": 1,
@@ -679,6 +716,9 @@ def settlement_cases(builder, consistency, models):
         "selDistance": 3000,
         "totalDis": 2150,
         "validDis": 1900,
+        # Pace recomputed for this case's own distance (2150 m / 760 s -> 5891), so the
+        # inherited base speed cannot contradict totalDis.
+        "speed": pace_milli(2150, 760),
         "unCompleteReason": 10,
         "goalId": "goal-42",
         "geeToken": "gee-token-value",
