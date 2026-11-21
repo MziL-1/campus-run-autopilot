@@ -30,6 +30,8 @@ import dev.campusrun.app.run.CoreRunStages
 import dev.campusrun.app.run.RunScreen
 import dev.campusrun.app.run.RunViewModel
 import dev.campusrun.app.session.SessionEpoch
+import dev.campusrun.app.update.UpdatePromptDialog
+import dev.campusrun.app.update.UpdatePromptState
 import dev.campusrun.core.api.ApiClient
 import dev.campusrun.core.config.ParamsStore
 import dev.campusrun.core.config.ProtocolParams
@@ -54,6 +56,11 @@ import java.net.InetAddress
  * and hosts 登录 → 首页 → 一键跑 → 进度/历史 → 导出诊断 behind one Compose `Route` state.
  * Logout (spec §5.5-3) drops the session back through [SessionManager] and returns to
  * the login screen without touching the device identity.
+ *
+ * Update prompt ownership (spec G4/R5): this activity owns the single
+ * [UpdatePromptState] instance — created before the auth branch and fed by the startup
+ * check unconditionally — and renders the only [UpdatePromptDialog] from its content, so
+ * an outdated build prompts on the LoginScreen too (fix: auth-state-independent prompt).
  */
 class MainActivity : ComponentActivity() {
 
@@ -152,9 +159,10 @@ class MainActivity : ComponentActivity() {
 
         // Startup update check (spec §5.6 / G4 / R5): version.json on a background thread —
         // every mirror failure is logged into diagLog and fails silent to "no update", and
-        // nothing here can block startup (ruling). The document feeds
-        // HomeViewModel.onVersionCheck, which raises the dismissible prompt only when
-        // minApkVersionCode > current.
+        // nothing here can block startup (ruling). The document feeds the shared
+        // UpdatePromptState (created below, BEFORE the auth branch), which raises the
+        // dismissible prompt only when minApkVersionCode > current — regardless of whether
+        // the app is logged in (fix: the prompt must show on the LoginScreen too).
         val updateInfo = mutableStateOf<RemoteVersionInfo?>(null)
         val updateChecker = UpdateChecker(
             log = { message ->
@@ -190,6 +198,12 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        // Single source of truth for the update prompt (fix: show regardless of auth
+        // state) — created here, OUTSIDE the `token == null` branch below, so it exists
+        // before login and survives login/logout for the whole activity lifetime. Both
+        // the global dialog and HomeViewModel read THIS instance (double-prompt guard).
+        val updatePromptState = UpdatePromptState(currentVersionCode)
+
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
@@ -213,6 +227,9 @@ class MainActivity : ComponentActivity() {
                                 token,
                                 currentVersionCode,
                                 tokenStore = logoutStore,
+                                // Shared with the global layer (double-prompt guard): Home
+                                // only views the prompt; MainActivity renders it.
+                                updatePromptState = updatePromptState,
                             )
                         }
                         val runVm = remember(token) {
@@ -224,9 +241,6 @@ class MainActivity : ComponentActivity() {
                                     Log.i(TAG, "run> $line")
                                 },
                             )
-                        }
-                        LaunchedEffect(updateInfo.value) {
-                            updateInfo.value?.let(homeVm::onVersionCheck)
                         }
                         // Logout: the VM dropped the session — return to the login screen
                         // in Idle. LoginViewModel still holds the stale Success, which
@@ -255,6 +269,22 @@ class MainActivity : ComponentActivity() {
                                 onBack = { route = Route.HOME },
                             )
                         }
+                    }
+
+                    // Global update prompt (fix: show regardless of auth state) — the
+                    // feed and the dialog live OUTSIDE the token branch, so a logged-out
+                    // install on LoginScreen is prompted exactly like a logged-in one.
+                    // One feed + one renderer over the shared UpdatePromptState = the
+                    // double-prompt guard; a null document (mirror failure) stays silent
+                    // and can never block login.
+                    LaunchedEffect(updateInfo.value) {
+                        updateInfo.value?.let(updatePromptState::onVersionCheck)
+                    }
+                    updatePromptState.prompt?.let { prompt ->
+                        UpdatePromptDialog(
+                            prompt = prompt,
+                            onDismiss = updatePromptState::dismiss,
+                        )
                     }
                 }
             }

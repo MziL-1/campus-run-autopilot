@@ -3,9 +3,9 @@ package dev.campusrun.app.home
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import dev.campusrun.app.update.UpdatePromptState
 import dev.campusrun.core.api.ApiClient
 import dev.campusrun.core.config.RemoteVersionInfo
-import dev.campusrun.core.config.UpdateChecker
 import dev.campusrun.core.diag.RedactedLog
 import dev.campusrun.core.policy.PolicyClient
 import dev.campusrun.core.policy.RunPolicy
@@ -19,8 +19,9 @@ import java.util.concurrent.Executors
 /**
  * Home screen state (brief: 进度/历史). [rules] and [historyLine] come from the two read-only
  * core clients (spec §5.5-6: 本校规则 + 当前进度 visible so users judge for themselves);
- * [error] carries a sanitized load failure. The update prompt lives in
- * [HomeViewModel.updatePrompt] — a separate state so a refresh can never clobber it.
+ * [error] carries a sanitized load failure. The update prompt is NOT owned here — it lives
+ * in the shared [dev.campusrun.app.update.UpdatePromptState] (MainActivity-owned, see its
+ * KDoc), so a refresh can never clobber it and the dialog renders once, globally.
  */
 data class HomeUiState(
     val loading: Boolean = true,
@@ -45,9 +46,10 @@ data class UpdatePrompt(val message: String, val downloadUrl: String?)
 
 /**
  * Home state owner: loads the school rules + latest history record on [executor], and
- * turns the startup `version.json` result ([onVersionCheck]) into a **non-blocking**
- * prompt state — `null` document (every mirror failed) stays silent, `minApkVersionCode >
- * current` raises [updatePrompt] (spec G4/R5, ruling: fail-silent + dismissible).
+ * **views** the startup `version.json` result ([onVersionCheck]) through the shared
+ * [updatePromptState] — the prompt itself is owned by MainActivity's global layer (fix:
+ * show regardless of auth state) so it can raise before login too; this VM only ever
+ * reads/delegates to the same instance (single source of truth → no double dialog).
  *
  * [logout] is the session-drop seam (spec §5.5-3): it reaches ONLY core's session-key
  * [TokenStore] contract, so device identity, install keys and ParamsStore are
@@ -61,6 +63,14 @@ class HomeViewModel(
         Thread(runnable, "home-loader").apply { isDaemon = true }
     },
     private val tokenStore: TokenStore,
+    /**
+     * The shared prompt state ([dev.campusrun.app.update.UpdatePromptState]) — MainActivity
+     * passes the one instance it created before the auth branch; the default (a fresh,
+     * Home-local holder) exists only for unit tests. Delegating to a shared instance is
+     * what keeps "show + dismissed" in one place: dismissing from the global dialog clears
+     * [updatePrompt] here too, so nothing can render the dialog a second time.
+     */
+    private val updatePromptState: UpdatePromptState = UpdatePromptState(currentApkVersionCode),
 ) {
 
     var state: HomeUiState by mutableStateOf(HomeUiState())
@@ -73,18 +83,20 @@ class HomeViewModel(
     var loggedOut: Boolean by mutableStateOf(false)
         private set
 
-    /** Update-required prompt (提示态); `null` = no prompt. Dismissible, never blocking. */
-    var updatePrompt: UpdatePrompt? by mutableStateOf(null)
-        private set
-
     /**
-     * The core update rule itself ([UpdateChecker.updateRequired]); no network happens here —
-     * [MainActivity] runs [UpdateChecker.check] off the main thread and hands the document over.
+     * Update-required prompt (提示态); `null` = no prompt. A **view** over the shared
+     * [updatePromptState] (see the constructor KDoc for ownership) — kept under this name
+     * so the existing Home tests and call sites read unchanged.
      */
-    private val updateChecker = UpdateChecker(log = {})
+    val updatePrompt: UpdatePrompt? get() = updatePromptState.prompt
 
-    /** Loads rules + progress (brief: 首页显示本校规则与进度). Safe to call repeatedly. */
-    fun refresh() {
+    /** Startup update check result — delegates to the shared holder (fail-silent: `null` → no prompt). */
+    fun onVersionCheck(info: RemoteVersionInfo?) = updatePromptState.onVersionCheck(info)
+
+    /** Dismisses the prompt — clears the shared holder, i.e. the global dialog too. */
+    fun dismissUpdatePrompt() = updatePromptState.dismiss()
+
+    /** Loads rules + progress (brief: 首页显示本校规则与进度). Safe to call repeatedly. */    fun refresh() {
         if (loggedOut) return // already logged out: the Home is gone, nothing to load.
         state = state.copy(loading = true, error = null)
         executor.execute {
@@ -107,23 +119,6 @@ class HomeViewModel(
                 state = state.copy(loading = false, error = readable(e))
             }
         }
-    }
-
-    /** Startup update check result (ruling: `null` fails silently to "no update"). */
-    fun onVersionCheck(info: RemoteVersionInfo?) {
-        if (info == null) return
-        if (updateChecker.updateRequired(info, currentApkVersionCode)) {
-            updatePrompt = UpdatePrompt(
-                message = "发现新版本：最低要求版本号 ${info.minApkVersionCode}（当前 $currentApkVersionCode）。" +
-                    "请下载更新最新 APK 后继续使用。",
-                // First mirror only (spec §8-6 下载多镜像 URL): the dialog offers one link.
-                downloadUrl = info.apkMirrors.firstOrNull(),
-            )
-        }
-    }
-
-    fun dismissUpdatePrompt() {
-        updatePrompt = null
     }
 
     /**

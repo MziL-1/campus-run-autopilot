@@ -24,17 +24,19 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 
 /**
  * Home (brief Step 3): the risk-control screen (spec §5.5-6/7) — this school's rules and
  * current progress from [HomeViewModel] (visible so users judge for themselves), the
  * first-run risk notice (incl. the ≤3-device red line, spec §5.5-3), navigation into the
- * one-shot run and the diagnostics export, the non-blocking update prompt raised by the
- * startup `version.json` check, and the spec §7 About surface carrying the
+ * one-shot run and the diagnostics export, and the spec §7 About surface carrying the
  * confirm-guarded logout action.
+ *
+ * The non-blocking update prompt raised by the startup `version.json` check is NOT
+ * rendered here: it moved to the global layer (MainActivity hosts
+ * [dev.campusrun.app.update.UpdatePromptDialog] outside the auth branch) so an outdated
+ * build prompts on the LoginScreen too — one renderer, one shared state, no double dialog.
  */
 @Composable
 fun HomeScreen(
@@ -44,7 +46,6 @@ fun HomeScreen(
 ) {
     LaunchedEffect(Unit) { vm.refresh() }
     val state = vm.state
-    val clipboard = LocalClipboardManager.current
 
     // 退出登录 (spec §5.5-3): confirm first, then [HomeViewModel.logout] drops the
     // session — [MainActivity] observes `loggedOut` and returns to the login screen.
@@ -66,37 +67,6 @@ fun HomeScreen(
             },
             dismissButton = {
                 TextButton(onClick = { confirmLogout = false }) { Text("取消") }
-            },
-        )
-    }
-
-    vm.updatePrompt?.let { prompt ->
-        // Non-blocking (spec G4/R5): a dismissible dialog — the app keeps working without updating.
-        AlertDialog(
-            onDismissRequest = vm::dismissUpdatePrompt,
-            title = { Text("发现新版本") },
-            text = {
-                Column {
-                    Text(prompt.message)
-                    prompt.downloadUrl?.let { url ->
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            url,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            },
-            confirmButton = {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    prompt.downloadUrl?.let { url ->
-                        TextButton(onClick = { clipboard.setText(AnnotatedString(url)) }) {
-                            Text("复制链接")
-                        }
-                    }
-                    TextButton(onClick = vm::dismissUpdatePrompt) { Text("知道了") }
-                }
             },
         )
     }
