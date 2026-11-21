@@ -1,9 +1,9 @@
 {
-  "minApkVersionCode": 1,
-  "configVersion": 1,
+  "minApkVersionCode": 2,
+  "configVersion": 2,
   "protocolParamsVersion": 1,
   "apkMirrors": [
-    "https://github.com/MziL-1/campus-run-autopilot/releases/download/v0.1.0/app-release.apk",
-    "https://cdn.example.invalid/campusrun/v0.1.0/app-release.apk"
+    "https://github.com/MziL-1/campus-run-autopilot/releases/download/v0.1.1/app-release.apk",
+    "https://github.com/MziL-1/campus-run-autopilot/releases/latest"
   ]
 }
