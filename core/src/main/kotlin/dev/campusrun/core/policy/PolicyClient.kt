@@ -198,6 +198,8 @@ internal fun parseRunPolicy(policy: JsonElement, geoFence: JsonElement): RunPoli
     require(dayGoal >= 0.0) { "runRuleModel dayGoal must be non-negative" }
     val minDistance = rule.doubleField("minDistance") ?: 0.0
     require(minDistance >= 0.0) { "runRuleModel minDistance must be non-negative" }
+    val weekCountGoal = rule.doubleField("weekCountGoal") ?: 0.0
+    require(weekCountGoal >= 0.0) { "runRuleModel weekCountGoal must be non-negative" }
 
     return geometry.toPolicy(
         paceMinSecPerKm = (speedTop * SECONDS_PER_MINUTE).roundToInt(),
@@ -206,6 +208,7 @@ internal fun parseRunPolicy(policy: JsonElement, geoFence: JsonElement): RunPoli
         validToHour = window.second,
         maxDistancePerRunM = dayGoal.roundToInt(),
         minDistancePerRunM = minDistance.roundToInt(),
+        weekCountGoal = weekCountGoal.roundToInt(),
     )
 }
 
@@ -224,6 +227,7 @@ private data class FenceGeometry(
         validToHour: Int,
         maxDistancePerRunM: Int,
         minDistancePerRunM: Int = 0,
+        weekCountGoal: Int = 0,
     ): RunPolicy = RunPolicy(
         requiredPoints = required,
         optionalPoints = optional,
@@ -236,6 +240,7 @@ private data class FenceGeometry(
         dailyRunLimit = 0,
         faceWindow = null,
         minDistancePerRunM = minDistancePerRunM,
+        weekCountGoal = weekCountGoal,
     )
 }
 

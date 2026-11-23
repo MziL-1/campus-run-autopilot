@@ -80,6 +80,20 @@ fun HomeScreen(
     ) {
         Text("校园跑", style = MaterialTheme.typography.headlineSmall)
 
+        // 当前校园名 (brief item 1): from the read-only user/info leg — the user's OWN
+        // school name (and optional nickname), on-device only. Blank until the profile
+        // leg lands; blank-on-failure shows nothing rather than inventing a school.
+        if (state.schoolName.isNotEmpty()) {
+            Text(
+                buildString {
+                    append("当前校园：")
+                    append(state.schoolName)
+                    if (state.nickname.isNotEmpty()) append(" · ${state.nickname}")
+                },
+                style = MaterialTheme.typography.titleMedium,
+            )
+        }
+
         // 风险告知 (spec §5.5-7): T12 shipped no disclaimer, so the minimal first-run
         // notice lives here, permanently visible (no prefs seam for a dismiss flag yet).
         Card(modifier = Modifier.fillMaxWidth()) {
@@ -107,6 +121,17 @@ fun HomeScreen(
             Column(Modifier.padding(16.dp)) {
                 Text("本校规则", style = MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(8.dp))
+                // 学校要求的里程 (brief item 2): its own prominent line above the detail
+                // rows, so the requirement reads as a fact even when the card is scanned
+                // past. Out-of-window policy (findings §3.5) reads 未公布, never a number.
+                if (state.requirementLine.isNotEmpty()) {
+                    Text(
+                        state.requirementLine,
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
                 when {
                     state.rules.isNotEmpty() -> state.rules.forEach { line ->
                         Text(line, style = MaterialTheme.typography.bodyMedium)
@@ -129,8 +154,41 @@ fun HomeScreen(
                 Text("当前进度", style = MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(8.dp))
                 when {
-                    state.historyLine.isNotEmpty() ->
-                        Text(state.historyLine, style = MaterialTheme.typography.bodyMedium)
+                    // 当前已完成的里程 (brief item 3): scope-labeled client-side sum of
+                    // the fetched page — the API exposes no semester summary (§3.1 D).
+                    state.cumulativeLine.isNotEmpty() -> {
+                        Text(
+                            state.cumulativeLine,
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                        if (state.latestLine.isNotEmpty()) {
+                            Spacer(Modifier.height(4.dp))
+                            Text(state.latestLine, style = MaterialTheme.typography.bodyMedium)
+                        }
+                    }
+
+                    state.loading -> Text("加载中…", style = MaterialTheme.typography.bodyMedium)
+                    else -> Text("暂无跑步记录", style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+        }
+
+        // 历史跑步记录 (brief item 4): the fetched page (up to 20 rows), objective fields
+        // only — date · distance · duration, no 达标/未达标 verdict, because our
+        // status-derived `valid` diverges from the official scoring in both directions.
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp)) {
+                Text("历史跑步记录", style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(8.dp))
+                when {
+                    state.historyRows.isNotEmpty() -> Column(
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        state.historyRows.forEach { row ->
+                            Text(row, style = MaterialTheme.typography.bodyMedium)
+                        }
+                    }
 
                     state.loading -> Text("加载中…", style = MaterialTheme.typography.bodyMedium)
                     else -> Text("暂无跑步记录", style = MaterialTheme.typography.bodyMedium)

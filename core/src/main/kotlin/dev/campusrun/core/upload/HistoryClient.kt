@@ -33,12 +33,32 @@ data class RunRecord(
 )
 
 /**
+ * One **objective** history row for the Home list (brief: 历史跑步记录): id, date,
+ * distance and duration only.
+ *
+ * Deliberately carries **no verdict**: the 7.4.x 19-key row (findings §3.1 D) has no
+ * field that tracks the official 达标 scoring — our `status`/`complete`-derived
+ * `valid` diverges from the official verdict in *both* directions (11-17: ours
+ * `true`, official 不达标; 11-21: ours `false`, official 达标) — so a verdict here
+ * would be presented as fact while being unreliable. See [HistoryClient.list].
+ *
+ * @param durationSec the row's `totalTime` (seconds), `null` when absent/unusable.
+ */
+data class HistoryEntry(
+    val id: String,
+    val startTimeMs: Long?,
+    val distanceM: Int,
+    val durationSec: Int?,
+)
+
+/**
  * History read-back, ported from upstream `协议/7.3.92/history/client.py`
  * (`get_run_records` -> `POST /api/v70230/runnings/records`) +
  * `history/models.py` (`parse_history_records`, `history_record_status`).
  *
  * [latest] fetches page 1 (`pageNum=1, pageSize=20, sid=0, type=1`, the upstream
- * defaults) and returns the first row — the newest record. Response tolerance mirrors
+ * defaults) and returns the first row — the newest record; [list] returns that same
+ * page as objective rows for the Home history list. Response tolerance mirrors
  * `parse_history_records`: `data` may be a row list, a `{recordList: [...]}` envelope,
  * or a JSON string of either; `null`/empty means "no records" -> `null`. A dict without
  * `recordList` is structurally wrong and throws [IllegalArgumentException] (upstream
@@ -53,6 +73,42 @@ data class RunRecord(
 class HistoryClient(val api: ApiClient) {
 
     fun latest(token: Token): RunRecord? {
+        val row = fetchRows(token).firstOrNull() ?: return null
+        return RunRecord(
+            id = rowId(row).toString(),
+            distanceM = pyRound(rowDistanceM(row)).toInt(),
+            valid = rowValid(row),
+            startTimeMs = rowStartTimeMs(row),
+        )
+    }
+
+    /**
+     * The full first page (up to 20 rows) as **objective** [HistoryEntry] rows for the
+     * Home history list (brief: 历史跑步记录 + 当前已完成的里程).
+     *
+     * The records response carries **no server-side semester/summary field**: 7.4.x
+     * `data` is a bare array of the 19-key rows (findings §3.1 D) and the legacy
+     * `{recordList}` envelope's siblings are not a summary either — so the caller must
+     * sum the fetched rows itself and label the scope honestly (`近N条累计`), never as a
+     * semester total. No verdict is derived here (see [HistoryEntry]).
+     *
+     * Same envelope contract as [latest]: business error or empty page -> empty list.
+     */
+    fun list(token: Token): List<HistoryEntry> = fetchRows(token).map { row ->
+        HistoryEntry(
+            id = rowId(row).toString(),
+            startTimeMs = rowStartTimeMs(row),
+            distanceM = pyRound(rowDistanceM(row)).toInt(),
+            durationSec = rowDurationSec(row),
+        )
+    }
+
+    /**
+     * Page 1 (`pageNum=1, pageSize=20, sid=0, type=1`, the upstream defaults) with the
+     * credential install at leg entry; `null`/empty history -> `[]`. Response tolerance
+     * mirrors `parse_history_records` (see the class KDoc).
+     */
+    private fun fetchRows(token: Token): List<JsonObject> {
         // The token is the request identity (same contract as PolicyClient/RunUploader).
         api.setCredentials(token.uid, token.value)
 
@@ -68,15 +124,9 @@ class HistoryClient(val api: ApiClient) {
         val root = payload as? JsonObject
             ?: throw IllegalArgumentException("history response must be a JSON object")
         if ((root["error"]?.jsonPrimitive?.contentOrNull)?.toDoubleOrNull()?.toLong() != BUSINESS_SUCCESS) {
-            return null
+            return emptyList()
         }
-        val row = parseHistoryRows(root["data"]).firstOrNull() ?: return null
-        return RunRecord(
-            id = rowId(row).toString(),
-            distanceM = pyRound(rowDistanceM(row)).toInt(),
-            valid = rowValid(row),
-            startTimeMs = rowStartTimeMs(row),
-        )
+        return parseHistoryRows(root["data"])
     }
 
     private companion object {
@@ -190,6 +240,12 @@ private fun rowStartTimeMs(row: JsonObject): Long? {
     val date = runCatching { LocalDate.parse(text.take(10).replace('/', '-')) }.getOrNull() ?: return null
     return date.atTime(12, 0).atZone(RunPolicyValidator.RULE_ZONE).toInstant().toEpochMilli()
 }
+
+/** Upstream row `totalTime` (seconds); absent/non-positive -> `null` (unknown, never 0-as-fact). */
+private fun rowDurationSec(row: JsonObject): Int? =
+    row.longField("totalTime")?.takeIf { it in 1..MAX_DURATION_SEC }?.toInt()
+
+private const val MAX_DURATION_SEC = 24 * 60 * 60
 
 private fun JsonObject.longField(key: String): Long? =
     primitive(key)?.let { it.content.toLongOrNull() ?: it.content.toDoubleOrNull()?.toLong() }

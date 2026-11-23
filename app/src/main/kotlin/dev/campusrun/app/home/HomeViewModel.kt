@@ -9,32 +9,67 @@ import dev.campusrun.core.config.RemoteVersionInfo
 import dev.campusrun.core.diag.RedactedLog
 import dev.campusrun.core.policy.PolicyClient
 import dev.campusrun.core.policy.RunPolicy
+import dev.campusrun.core.policy.RunPolicyValidator
+import dev.campusrun.core.profile.ProfileClient
+import dev.campusrun.core.profile.UserProfile
 import dev.campusrun.core.session.Token
 import dev.campusrun.core.session.TokenStore
 import dev.campusrun.core.upload.HistoryClient
-import dev.campusrun.core.upload.RunRecord
+import dev.campusrun.core.upload.HistoryEntry
+import java.time.Instant
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 
 /**
- * Home screen state (brief: 进度/历史). [rules] and [historyLine] come from the two read-only
- * core clients (spec §5.5-6: 本校规则 + 当前进度 visible so users judge for themselves);
- * [error] carries a sanitized load failure. The update prompt is NOT owned here — it lives
- * in the shared [dev.campusrun.app.update.UpdatePromptState] (MainActivity-owned, see its
- * KDoc), so a refresh can never clobber it and the dialog renders once, globally.
+ * Home screen state (brief: 进度/历史/校园).
+ *
+ * - [rules] and [requirementLine] come from the read-only [PolicyClient] leg (spec §5.5-6:
+ *   本校规则 + the school's required mileage, surfaced prominently so users judge for
+ *   themselves). [requirementLine] is its own field so the requirement reads as a fact
+ *   even when the full rule card is scanned past.
+ * - [schoolName] / [nickname] come from the new read-only [ProfileClient] leg — the
+ *   user's OWN school name and nickname, shown on-device only (PII rule: never the 真名).
+ * - [cumulativeLine] is the **client-side sum of the fetched history page**, labeled
+ *   `近N条累计` — the records response carries no server-side semester summary
+ *   (findings §3.1 D), so it must never claim to be a semester total.
+ * - [historyRows] renders the fetched rows (up to 20) as objective date/distance/duration
+ *   lines — **no 达标/未达标 verdict**: our `valid` derivation diverges from the official
+ *   scoring in both directions, so it must not be presented as fact.
+ * - [error] carries a sanitized load failure.
+ *
+ * The update prompt is NOT owned here — it lives in the shared
+ * [dev.campusrun.app.update.UpdatePromptState] (MainActivity-owned, see its KDoc), so a
+ * refresh can never clobber it and the dialog renders once, globally.
  */
 data class HomeUiState(
     val loading: Boolean = true,
     val rules: List<String> = emptyList(),
-    val historyLine: String = "",
+    /** 学校要求的里程 — prominent single line; `""` until the policy leg lands. */
+    val requirementLine: String = "",
+    /** 当前校园名 from `user/info`; `""` until the profile leg lands (or on its failure). */
+    val schoolName: String = "",
+    /** Optional nickname (user's own, on-device); `""` when the server sends none. */
+    val nickname: String = "",
+    /** 当前已完成的里程 — client-side sum of the fetched page, scope-labeled. */
+    val cumulativeLine: String = "",
+    /** Newest record, objective fields only; `""` when there is no record. */
+    val latestLine: String = "",
+    /** 历史跑步记录 — one objective line per fetched row (date · distance · duration). */
+    val historyRows: List<String> = emptyList(),
     val error: String? = null,
 )
 
-/** Read-only seam for Home: the two core fetches, fakeable in [HomeViewModelTest]. */
+/** Read-only seam for Home: the three core fetches, fakeable in [HomeViewModelTest]. */
 interface HomeData {
     fun fetchPolicy(token: Token): RunPolicy
 
-    fun latest(token: Token): RunRecord?
+    /** Best-effort: `null` (or a thrown transport error) leaves the school name blank. */
+    fun fetchProfile(token: Token): UserProfile?
+
+    /** Page 1 of history as objective rows; empty list when there is no history. */
+    fun fetchHistory(token: Token): List<HistoryEntry>
 }
 
 /**
@@ -45,11 +80,16 @@ interface HomeData {
 data class UpdatePrompt(val message: String, val downloadUrl: String?)
 
 /**
- * Home state owner: loads the school rules + latest history record on [executor], and
- * **views** the startup `version.json` result ([onVersionCheck]) through the shared
- * [updatePromptState] — the prompt itself is owned by MainActivity's global layer (fix:
- * show regardless of auth state) so it can raise before login too; this VM only ever
- * reads/delegates to the same instance (single source of truth → no double dialog).
+ * Home state owner: loads the school rules + required mileage, the profile (school
+ * name/nickname) and the history page on [executor], and **views** the startup
+ * `version.json` result ([onVersionCheck]) through the shared [updatePromptState] — the
+ * prompt itself is owned by MainActivity's global layer (fix: show regardless of auth
+ * state) so it can raise before login too; this VM only ever reads/delegates to the same
+ * instance (single source of truth → no double dialog).
+ *
+ * The profile leg is **cosmetic and best-effort**: a failed `user/info` call degrades to
+ * a blank school name and never fails the refresh, because rules + history are the
+ * risk-control facts and must still render.
  *
  * [logout] is the session-drop seam (spec §5.5-3): it reaches ONLY core's session-key
  * [TokenStore] contract, so device identity, install keys and ParamsStore are
@@ -96,24 +136,32 @@ class HomeViewModel(
     /** Dismisses the prompt — clears the shared holder, i.e. the global dialog too. */
     fun dismissUpdatePrompt() = updatePromptState.dismiss()
 
-    /** Loads rules + progress (brief: 首页显示本校规则与进度). Safe to call repeatedly. */    fun refresh() {
+    /** Loads rules + profile + history (brief: 首页显示校园名、要求里程与进度历史). Safe to call repeatedly. */
+    fun refresh() {
         if (loggedOut) return // already logged out: the Home is gone, nothing to load.
         state = state.copy(loading = true, error = null)
         executor.execute {
             try {
                 // Fix (invalidate in-flight work on logout): every token-taking leg
-                // re-checks — PolicyClient/HistoryClient re-install their token into the
-                // shared ApiClient at leg entry, so a leg started after the drop would
-                // resurrect the cleared credentials.
+                // re-checks — PolicyClient/ProfileClient/HistoryClient re-install their
+                // token into the shared ApiClient at leg entry, so a leg started after
+                // the drop would resurrect the cleared credentials.
                 if (loggedOut) return@execute
                 val policy = data.fetchPolicy(token)
                 if (loggedOut) return@execute
-                val record = data.latest(token)
+                val profile = runCatching { data.fetchProfile(token) }.getOrNull()
+                if (loggedOut) return@execute
+                val history = data.fetchHistory(token)
                 if (loggedOut) return@execute
                 state = HomeUiState(
                     loading = false,
                     rules = ruleLines(policy),
-                    historyLine = historyText(record),
+                    requirementLine = requirementText(policy),
+                    schoolName = profile?.schoolName.orEmpty(),
+                    nickname = profile?.displayName.orEmpty(),
+                    cumulativeLine = cumulativeText(history),
+                    latestLine = latestText(history.firstOrNull()),
+                    historyRows = history.map(::historyRowText),
                 )
             } catch (e: Exception) {
                 state = state.copy(loading = false, error = readable(e))
@@ -171,16 +219,15 @@ class HomeViewModel(
                 "每日次数：未公布（建议每日 1 次自限）"
             },
         )
+        // 学期/每周要求次数 (guidance #5): 7.4.x advertises weekCountGoal only — shown
+        // when present, omitted otherwise (the weekly goal is not a daily cap, so it must
+        // not masquerade as one).
+        if (policy.weekCountGoal > 0) {
+            add("每周要求：${policy.weekCountGoal} 次")
+        }
         if (policy.requiredPoints.isNotEmpty() || policy.optionalPoints.isNotEmpty()) {
             add("点位：必经 ${policy.requiredPoints.size} 个，可选 ${policy.optionalPoints.size} 个")
         }
-    }
-
-    /** 当前进度 from HistoryClient: the newest record, or the empty-state copy. */
-    private fun historyText(record: RunRecord?): String = when (record) {
-        null -> "暂无跑步记录"
-        else -> "最近记录：id=${record.id} · ${record.distanceM} m · " +
-            if (record.valid) "达标" else "未达标"
     }
 
     /** Seconds-per-km → `m:ss`. */
@@ -193,9 +240,75 @@ class HomeViewModel(
     }
 }
 
-/** Production [HomeData]: the two read-only core clients over the shared [ApiClient]. */
+/**
+ * 学校要求的里程 (brief item 2): the rule's per-run floor and daily cap as one prominent
+ * line. An out-of-window/empty policy (7.4.x returns no `runRuleModel` before 10:00,
+ * findings §3.5) reads `未公布` — never a made-up number.
+ */
+internal fun requirementText(policy: RunPolicy): String {
+    val min = policy.minDistancePerRunM
+    val cap = policy.maxDistancePerRunM
+    if (min <= 0 && cap <= 0) return "学校要求：未公布"
+    val parts = buildList {
+        if (min > 0) add("单次 ≥ $min m") else add("单次未公布")
+        if (cap > 0) add("单日 ≤ $cap m") else add("单日未公布")
+    }
+    return "学校要求：" + parts.joinToString("，")
+}
+
+/**
+ * 当前已完成的里程 (brief item 3): the sum of the **fetched page's** rows, labeled with
+ * that exact scope (`近N条累计`). The records API exposes no semester summary
+ * (findings §3.1 D — `data` is a bare row array), so presenting this as a semester total
+ * would fabricate completeness we do not have; the label keeps the claim honest.
+ * An empty page is the empty-state copy, not a zero total.
+ */
+internal fun cumulativeText(rows: List<HistoryEntry>): String {
+    if (rows.isEmpty()) return "暂无跑步记录"
+    val totalM = rows.sumOf { it.distanceM }
+    val distance = if (totalM >= 1000) {
+        String.format(Locale.ROOT, "%.2f km", totalM / 1000.0)
+    } else {
+        "$totalM m"
+    }
+    return "已完成：近 ${rows.size} 条累计 $distance"
+}
+
+/**
+ * One 历史跑步记录 row (brief item 4): date · distance · duration, objective fields
+ * only. Unknown `startTime`/`totalTime` degrade to explicit placeholders — printing
+ * epoch 0 or a 0 s duration would state a fact we do not have.
+ */
+internal fun historyRowText(row: HistoryEntry): String =
+    "${rowDate(row.startTimeMs)} · ${row.distanceM} m · ${formatDuration(row.durationSec)}"
+
+/** Newest record as one objective line; `""` when there is no record at all. */
+internal fun latestText(row: HistoryEntry?): String {
+    if (row == null) return ""
+    return "最近记录：id=${row.id} · ${rowDate(row.startTimeMs)} · " +
+        "${row.distanceM} m · ${formatDuration(row.durationSec)}"
+}
+
+/** `totalTime` seconds → `m:ss` under an hour, `h:mm:ss` above; unknown stays unknown. */
+internal fun formatDuration(seconds: Int?): String = when {
+    seconds == null || seconds <= 0 -> "时长未知"
+    seconds < 3600 -> "%d:%02d".format(seconds / 60, seconds % 60)
+    else -> "%d:%02d:%02d".format(seconds / 3600, (seconds % 3600) / 60, seconds % 60)
+}
+
+/** `startTime` epoch ms → `MM-dd HH:mm` in the platform wall-clock zone; unknown stays unknown. */
+private fun rowDate(startTimeMs: Long?): String {
+    if (startTimeMs == null) return "日期未知"
+    return ROW_DATE_FORMAT.format(Instant.ofEpochMilli(startTimeMs).atZone(RunPolicyValidator.RULE_ZONE))
+}
+
+private val ROW_DATE_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("MM-dd HH:mm")
+
+/** Production [HomeData]: the three read-only core clients over the shared [ApiClient]. */
 class CoreHomeData(private val api: ApiClient) : HomeData {
     override fun fetchPolicy(token: Token): RunPolicy = PolicyClient(api).fetch(token, mode = 1)
 
-    override fun latest(token: Token): RunRecord? = HistoryClient(api).latest(token)
+    override fun fetchProfile(token: Token): UserProfile? = ProfileClient(api).fetch(token)
+
+    override fun fetchHistory(token: Token): List<HistoryEntry> = HistoryClient(api).list(token)
 }

@@ -56,6 +56,8 @@ class PolicyClientTest {
         assertEquals(2000, policy.minDistancePerRunM)
         // No daily-count field in the 7.4.x rule body; weekCountGoal (0) is weekly, not daily.
         assertEquals(0, policy.dailyRunLimit)
+        // The live fixture advertises weekCountGoal=0 (not set for this school).
+        assertEquals(0, policy.weekCountGoal)
         // runFaceCheckConfigDTO = null and the 7.4.x DTO carries no epoch window fields.
         assertNull(policy.faceWindow)
     }
@@ -199,6 +201,8 @@ class PolicyClientTest {
         assertEquals(3000, policy.maxDistancePerRunM) // dayGoal, not minDistance
         assertEquals(1500, policy.minDistancePerRunM) // minDistance is the per-run floor
         assertEquals(0, policy.dailyRunLimit) // weekCountGoal is weekly; no daily field exists
+        // weekCountGoal (4) must be surfaced as its own field, not folded into dailyRunLimit.
+        assertEquals(4, policy.weekCountGoal)
 
         assertEquals(4, policy.fence.size)
         assertEquals(LatLng(30.0000, 120.0000), policy.fence.first())

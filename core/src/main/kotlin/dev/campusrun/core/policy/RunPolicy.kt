@@ -53,4 +53,11 @@ data class RunPolicy(
      * completeness floor instead (upstream builder `selDistance = 2000`).
      */
     val minDistancePerRunM: Int = 0,
+    /**
+     * `runRuleModel.weekCountGoal` — the school's **weekly** run-count goal (7.4.x
+     * advertises this instead of any daily cap). 0 means "not advertised". Kept
+     * separate from [dailyRunLimit] (which stays 0: weekly ≠ daily) so the Home can
+     * surface the count the school actually requires.
+     */
+    val weekCountGoal: Int = 0,
 )

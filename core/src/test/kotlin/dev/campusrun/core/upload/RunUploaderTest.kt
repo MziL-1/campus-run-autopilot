@@ -288,6 +288,38 @@ class RunUploaderTest {
     }
 
     @Test
+    fun `history list returns every page row as objective entries without a verdict`() {
+        // The 7.4.x bare-array envelope (findings §3.1 D): 19-key rows, no summary field.
+        server.enqueue(
+            MockResponse().setBody(
+                """{"error":10000,"data":[""" +
+                    """{"rrid":30,"totalDis":2084.4,"totalTime":760,"startTime":1795246200000,"status":1,"complete":true},""" +
+                    """{"rrid":29,"totalDis":1500,"totalTime":600,"startTime":1795159800000,"status":1,"complete":false},""" +
+                    """{"rrid":28,"totalDis":1000,"startTime":1795073400000}]}""",
+            ),
+        )
+        // Business error -> empty list (same contract as latest -> null).
+        server.enqueue(MockResponse().setBody("""{"error":-10000,"message":"ERROR","data":null}"""))
+
+        val entries = HistoryClient(api()).list(TOKEN)
+
+        assertEquals(3, entries.size, "the whole page must come back, not just the newest row")
+        assertEquals(
+            HistoryEntry(
+                id = "30",
+                startTimeMs = 1795246200000L,
+                distanceM = 2084, // pyRound(2084.4)
+                durationSec = 760,
+            ),
+            entries[0],
+        )
+        assertEquals(1500, entries[1].distanceM)
+        assertNull(entries[2].durationSec, "a row without totalTime must stay unknown, not 0")
+
+        assertEquals(emptyList<HistoryEntry>(), HistoryClient(api()).list(TOKEN), "business error -> no rows")
+    }
+
+    @Test
     fun `history latest rejects an envelope without recordList`() {
         server.enqueue(MockResponse().setBody("""{"error":10000,"data":{}}"""))
 

@@ -122,10 +122,10 @@ class UpdateCheckerTest {
         val info = UpdateChecker(log = logs::add).check(listOf(baseUrl(healthy)))
 
         assertNotNull(info, "config/version.json must parse through the production decoder")
-        // Pinned sample values: the current build (versionCode 1) satisfies the floor,
-        // and the sample's protocolParamsVersion matches the bundled versionTag (1).
-        assertEquals(1, info!!.minApkVersionCode)
-        assertEquals(1, info.configVersion)
+        // Pinned sample values: the current sample floor (2, bumped by 1ed1493 with the
+        // v0.1.1 channel) and protocolParamsVersion match the bundled versionTag (1).
+        assertEquals(2, info!!.minApkVersionCode)
+        assertEquals(2, info.configVersion)
         assertEquals(1, info.protocolParamsVersion)
         assertTrue(info.apkMirrors.isNotEmpty(), "the sample advertises download mirrors")
     }

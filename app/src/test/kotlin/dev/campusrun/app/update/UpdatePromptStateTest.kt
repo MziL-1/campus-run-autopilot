@@ -4,9 +4,10 @@ import dev.campusrun.app.home.HomeData
 import dev.campusrun.app.home.HomeViewModel
 import dev.campusrun.core.config.RemoteVersionInfo
 import dev.campusrun.core.policy.RunPolicy
+import dev.campusrun.core.profile.UserProfile
 import dev.campusrun.core.session.Token
 import dev.campusrun.core.session.TokenStore
-import dev.campusrun.core.upload.RunRecord
+import dev.campusrun.core.upload.HistoryEntry
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
@@ -116,7 +117,9 @@ class UpdatePromptStateTest {
             minDistancePerRunM = 2000,
         )
 
-        override fun latest(token: Token): RunRecord? = null
+        override fun fetchProfile(token: Token): UserProfile? = null
+
+        override fun fetchHistory(token: Token): List<HistoryEntry> = emptyList()
     }
 
     private class FakeStore : TokenStore {
