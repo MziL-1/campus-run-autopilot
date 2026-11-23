@@ -24,6 +24,12 @@ import java.time.ZoneId
  *   (findings §3.1 D) — normalised from epoch ms, epoch seconds or a `yyyy-MM-dd` date
  *   string. `null` when the row carries no usable timestamp; see [dailySelfLimitRefusal]
  *   for how the daily gate treats that.
+ *
+ * @param valid server row field (`isValid`/`complete`/`status`-derived) with divergent
+ *   semantics vs official scoring — do not display as a verdict; official scoring is
+ *   verified externally (grayscale daily official-app check), never from this flag.
+ *   Diverges in both directions: 11-17 ours `true`/官方 不达标, 11-21 & 11-23 ours
+ *   `false`/官方 达标.
  */
 data class RunRecord(
     val id: String,
