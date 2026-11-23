@@ -26,6 +26,8 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import java.io.File
 import java.security.SecureRandom
+import java.time.Instant
+import java.time.format.DateTimeFormatter
 import kotlin.random.Random
 import kotlin.system.exitProcess
 
@@ -37,7 +39,7 @@ import kotlin.system.exitProcess
  * probe   read-only: clock skew, run rule, fence/checkpoint geometry, latest record
  * run     sync -> policy -> synth -> validate (any violation refuses submission)
  *         -> OBS upload -> save/record settle -> history verify
- * verify  read-only: latest history record, exit 0 iff valid == true
+ * verify  read-only: latest history record, exit 0 iff a record was read back
  * ```
  *
  * The session comes from `CAMPUS_TOKEN` / `CAMPUS_UID` / `CAMPUS_UNID` (env only —
@@ -64,7 +66,7 @@ private fun printUsage() {
           probe                                读取时钟偏斜/跑步规则/围栏点位/最新记录（不提交）
           run --distance <m> --time <s> [--seed <n>] [--runs-today <n>]
                                                一键跑：校验通过才提交，否则拒绝
-          verify                               回查最新记录，达标退出码 0
+          verify                               回查最新记录，有记录退出码 0
         会话经环境变量传入：CAMPUS_TOKEN / CAMPUS_UID / CAMPUS_UNID
         本机身份（线钥 + 设备盐）首次运行生成并持久化于 ~/.campusrun/，每台机器独立
         """.trimIndent(),
@@ -424,6 +426,24 @@ internal fun dailyLimitAdmission(runsToday: Int?, policy: RunPolicy): String? =
 
 // ---------------------------------------------------------------- subcommands
 
+/**
+ * One **objective** read-back row: `id · distance · date` (the fixed [RunPolicyValidator.RULE_ZONE]
+ * date, or an explicit placeholder when the row carries no usable `startTime`).
+ *
+ * Deliberately carries **no verdict**: our [RunRecord.valid] diverges from the official
+ * 达标 scoring in both directions (11-17 ours `true`/官方 不达标; 11-21 & 11-23 ours
+ * `false`/官方 达标), so `verify`/`run` may only state facts — official scoring stays
+ * external (grayscale daily official-app check).
+ */
+internal fun recordFactLine(record: RunRecord): String {
+    val date = record.startTimeMs?.let {
+        RECORD_DATE_FORMAT.format(Instant.ofEpochMilli(it).atZone(RunPolicyValidator.RULE_ZONE))
+    } ?: "日期未知"
+    return "id=${record.id} · ${record.distanceM} m · $date"
+}
+
+private val RECORD_DATE_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("MM-dd HH:mm")
+
 private fun probeCommand(): Int {
     val token = sessionFromEnv() ?: return missingSession()
     return try {
@@ -458,18 +478,16 @@ private fun verifyCommand(): Int {
     return try {
         val api = ApiClient(params = productionParams(), deviceHeaders = deviceHeaders())
         val record = HistoryClient(api).latest(token)
+        // Exit code keys on the OBJECTIVE fact (a record was read back), never on the
+        // divergent `valid` flag — see recordFactLine.
         when {
             record == null -> {
                 println("verify: no records")
                 1
             }
-            record.valid -> {
-                println("verify: id=${record.id}, ${record.distanceM} m, valid=true")
-                0
-            }
             else -> {
-                println("verify: id=${record.id}, ${record.distanceM} m, valid=false (未达标)")
-                1
+                println("verify: ${recordFactLine(record)}")
+                0
             }
         }
     } catch (e: Exception) {
@@ -498,16 +516,14 @@ private fun runCommand(args: List<String>): Int {
             }
             !outcome.uploaded -> 1
             outcome.record == null -> {
-                System.err.println("提交已接受 (rrid=${outcome.rrid}) 但回查无记录，无法判定")
+                System.err.println("提交已接受 (rrid=${outcome.rrid}) 但回查无记录")
                 1
-            }
-            outcome.record.valid -> {
-                println("完成：达标 distance=${outcome.record.distanceM} m id=${outcome.record.id}")
-                0
             }
             else -> {
-                System.err.println("回查未达标：distance=${outcome.record.distanceM} m id=${outcome.record.id}")
-                1
+                // Settlement already succeeded (rrid above); read-back reports objective
+                // facts only — never a verdict from the divergent `valid` flag.
+                println("回查记录已写入：${recordFactLine(outcome.record)}")
+                0
             }
         }
     } catch (e: StageFailure) {

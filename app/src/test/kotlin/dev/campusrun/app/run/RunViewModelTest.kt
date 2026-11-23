@@ -8,6 +8,7 @@ import dev.campusrun.core.track.TrackPoint
 import dev.campusrun.core.upload.RunRecord
 import dev.campusrun.core.upload.UploadHandle
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.time.LocalDate
@@ -46,7 +47,39 @@ class RunViewModelTest {
         state as RunState.Success
         assertEquals(2030, state.distanceM, "Success must carry the run's distance")
         assertTrue(state.message.contains("2030"), "mileage not displayed: ${state.message}")
+        // Verdict-free objective row (same defect class as the Home fix): the message must
+        // state id/distance/date facts and must never derive a verdict from `valid`.
+        assertTrue(
+            state.message.contains("回查记录已写入"),
+            "objective record line required: ${state.message}",
+        )
+        assertTrue(state.message.contains("id=9001"), "record id not displayed: ${state.message}")
+        assertFalse(state.message.contains("达标"), "no verdict may render: ${state.message}")
         assertEquals(1, fake.uploadCalls, "a passing gate should upload exactly once")
+    }
+
+    @Test
+    fun `read-back valid=false - the submission still succeeds with an objective line`() {
+        // The 11-23 case: our flag said false while the official app scored 达标 — the
+        // divergent flag must never route a settled submission into Error.
+        val fake = FakeRunStages(
+            policy = policy(),
+            track = track(distanceM = 2030, durationSec = 760),
+            record = RunRecord(id = "9007", distanceM = 2030, valid = false, startTimeMs = PAST_MS),
+        )
+        val vm = RunViewModel(fake, TOKEN, DIRECT, settleWaitMs = 0)
+
+        vm.startRun(distanceM = 2030, durationSec = 760)
+
+        val state = vm.state
+        assertTrue(state is RunState.Success, "valid=false must not fail a settled run: $state")
+        state as RunState.Success
+        assertTrue(
+            state.message.contains("回查记录已写入：id=9007 · 2030 m"),
+            "objective id/distance row required: ${state.message}",
+        )
+        assertFalse(state.message.contains("未达标"), "no verdict may render: ${state.message}")
+        assertFalse(state.message.contains("valid"), "the flag must stay out of the UI: ${state.message}")
     }
 
     @Test

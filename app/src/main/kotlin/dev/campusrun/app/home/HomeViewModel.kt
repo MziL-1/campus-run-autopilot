@@ -296,7 +296,10 @@ internal fun formatDuration(seconds: Int?): String = when {
     else -> "%d:%02d:%02d".format(seconds / 3600, (seconds % 3600) / 60, seconds % 60)
 }
 
-/** `startTime` epoch ms → `MM-dd HH:mm` in the platform wall-clock zone; unknown stays unknown. */
+/**
+ * `startTime` epoch ms → `MM-dd HH:mm` in the fixed `Asia/Shanghai` rule zone
+ * ([RunPolicyValidator.RULE_ZONE]); unknown stays unknown.
+ */
 private fun rowDate(startTimeMs: Long?): String {
     if (startTimeMs == null) return "日期未知"
     return ROW_DATE_FORMAT.format(Instant.ofEpochMilli(startTimeMs).atZone(RunPolicyValidator.RULE_ZONE))

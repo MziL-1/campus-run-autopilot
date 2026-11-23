@@ -28,6 +28,8 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+import java.time.Instant
+import java.time.format.DateTimeFormatter
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import kotlin.random.Random
@@ -36,8 +38,8 @@ import kotlin.random.Random
  * One-shot run state machine (brief Step 2):
  *
  * ```text
- * Idle ──► Running ──► Success(distanceM, msg)   gate passed, uploaded, verified 达标
- *   │         │       └► Error(msg)              gate refusal / stage failure / 回查未达标
+ * Idle ──► Running ──► Success(distanceM, msg)   gate passed, uploaded, record read back
+ *   │         │       └► Error(msg)              gate refusal / stage failure / 回查无记录
  *   │         └──────────► (executor)
  *   └─► Error(msg)      refused before Running (daily self-limit, bad input)
  * ```
@@ -49,7 +51,12 @@ sealed class RunState {
     data object Idle : RunState()
     data object Running : RunState()
 
-    /** Submitted, read back and 达标 — [distanceM] is the server-confirmed record distance. */
+    /**
+     * Submitted and read back — [distanceM] is the server-confirmed record distance.
+     * Deliberately carries **no 达标/未达标 verdict**: our `RunRecord.valid` diverges from
+     * the official scoring in both directions (11-17 ours `true`/官方 不达标; 11-21 &
+     * 11-23 ours `false`/官方 达标), so only objective record facts are stated here.
+     */
     data class Success(val distanceM: Int, val message: String) : RunState()
 
     data class Error(val message: String) : RunState()
@@ -250,20 +257,40 @@ class RunViewModel(
                 "verify: " + (record?.let { "id=${it.id}, ${it.distanceM} m, valid=${it.valid}" } ?: "no record returned"),
             )
 
-            when {
-                record == null -> fail("提交已接受 (rrid=$rrid) 但回查无记录，无法判定")
-                record.valid -> succeed(record)
-                else -> fail("回查未达标：${record.distanceM} m，记录 id=${record.id}")
+            // Verdict-free read-back: our `valid` flag diverges from the official scoring
+            // in both directions, so it must never choose an error-vs-success message.
+            // The submission itself already succeeded at settle (rrid above) either way —
+            // only objective record facts are reported below.
+            if (record == null) {
+                fail("提交已接受 (rrid=$rrid) 但回查无记录")
+            } else {
+                succeed(record)
             }
         } catch (e: Exception) {
             fail(readable(e))
         }
     }
 
+    /**
+     * Terminal success: settlement accepted the record and the history read-back returned
+     * it. The message states objective facts only (id · distance · date · official-app
+     * pointer) — never a verdict derived from [RunRecord.valid] (see [RunState.Success]).
+     */
     private fun succeed(record: RunRecord) {
-        val message = "提交成功：${record.distanceM} m，达标（记录 id=${record.id}）"
+        val message = "回查记录已写入：${recordFactLine(record)}（以官方 App 回查为准）"
         RecentResults.add("一键跑：$message")
         set(RunState.Success(record.distanceM, message))
+    }
+
+    /**
+     * One objective read-back row: `id · distance · date` (the fixed [RunPolicyValidator.RULE_ZONE]
+     * date, or an explicit placeholder when the row carries no usable `startTime`).
+     */
+    private fun recordFactLine(record: RunRecord): String {
+        val date = record.startTimeMs?.let {
+            ROW_DATE_FORMAT.format(Instant.ofEpochMilli(it).atZone(RunPolicyValidator.RULE_ZONE))
+        } ?: "日期未知"
+        return "id=${record.id} · ${record.distanceM} m · $date"
     }
 
     /**
@@ -299,6 +326,9 @@ class RunViewModel(
     }
 
     private companion object {
+        /** Date shape of the objective read-back row (same as Home's history rows). */
+        val ROW_DATE_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("MM-dd HH:mm")
+
         /** Mainland-China bounding box for issued checkpoints (risk control §5.5, CLI port). */
         const val CHINA_MIN_LAT = 5.0
         const val CHINA_MAX_LAT = 55.0
