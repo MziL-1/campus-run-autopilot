@@ -1,5 +1,7 @@
 package dev.campusrun.app.home
 
+import dev.campusrun.app.run.RunStages
+import dev.campusrun.app.run.RunViewModel
 import dev.campusrun.core.config.RemoteVersionInfo
 import dev.campusrun.core.campus.CampusOption
 import dev.campusrun.core.campus.CampusSelectionStore
@@ -8,7 +10,10 @@ import dev.campusrun.core.policy.RunPolicy
 import dev.campusrun.core.profile.UserProfile
 import dev.campusrun.core.session.Token
 import dev.campusrun.core.session.TokenStore
+import dev.campusrun.core.track.TrackPoint
 import dev.campusrun.core.upload.HistoryEntry
+import dev.campusrun.core.upload.RunRecord
+import dev.campusrun.core.upload.UploadHandle
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
@@ -369,23 +374,104 @@ class HomeViewModelTest {
         assertEquals(0, data.semesterCalls, "the semester leg must not start after logout either")
     }
 
+    // --- 校区下拉 (campus switcher): the behavior matrix over BOTH platform signals ---
+    // 1) one campus → plain line · 2) several + all allowChange=false → read-only ·
+    // 3) gate closed OR gate fetch failed → read-only (conservative) ·
+    // 4) several + permitted + gate open → dropdown.
+
     @Test
-    fun `campus list - two campuses surface and the platform's selected campus drives the policy unid`() {
-        val data = FakeHomeData(policy(), campuses = CAMPUS_LIST)
-        val vm = HomeViewModel(data, TOKEN, CURRENT_VERSION, DIRECT, FakeSecureStore())
+    fun `matrix - permitted campuses with an open gate offer the dropdown`() {
+        val selection = FakeCampusSelection()
+        val data = FakeHomeData(policy(), campuses = CAMPUS_LIST, gate = true)
+        val vm = HomeViewModel(
+            data,
+            TOKEN,
+            CURRENT_VERSION,
+            DIRECT,
+            FakeSecureStore(),
+            campusSelection = selection,
+        )
 
         vm.refresh()
 
         assertEquals(2, vm.state.campuses.size, "the account's campuses must surface")
-        assertTrue(campusSwitchable(vm.state.campuses), "two campuses are a real choice")
+        assertTrue(vm.state.campusSwitchable, "case 4: several + permitted + gate open")
+        assertEquals(CAMPUS_LIST, vm.state.campusChoices, "only allowChange=true entries are offered")
         assertEquals(35102, vm.state.selectedCampusUnid, "the platform's isSelected campus is in effect")
-        assertEquals(listOf("35102"), data.policyUnids, "the rule must be read for that campus (selectUnid)")
+        assertEquals(listOf("35102"), data.policyUnids, "the rule is read for that campus (selectUnid)")
+        assertEquals(
+            "35102",
+            selection.value,
+            "store ≡ effective: the run pipeline reads this SAME unid (display/execution agree)",
+        )
+    }
+
+    @Test
+    fun `matrix - a single campus stays a plain line even with the gate open`() {
+        val data = FakeHomeData(policy(), campuses = CAMPUS_LIST.take(1), gate = true)
+        val vm = HomeViewModel(data, TOKEN, CURRENT_VERSION, DIRECT, FakeSecureStore())
+
+        vm.refresh()
+
+        assertFalse(vm.state.campusSwitchable, "case 1: one campus is not a choice")
+        assertEquals(
+            listOf(35102),
+            vm.state.campusChoices.map { it.unid },
+            "the permitted entry is known, but one campus offers no choice",
+        )
+        assertEquals(35102, vm.state.selectedCampusUnid, "the only campus is still the one in effect")
+        assertEquals(listOf("35102"), data.policyUnids, "the rule keeps following that campus")
+    }
+
+    @Test
+    fun `matrix - several campuses the platform marks unchangeable render read-only`() {
+        val locked = CAMPUS_LIST.map { it.copy(allowChange = false) }
+        val data = FakeHomeData(policy(), campuses = locked, gate = true)
+        val vm = HomeViewModel(data, TOKEN, CURRENT_VERSION, DIRECT, FakeSecureStore())
+
+        vm.refresh()
+
+        assertFalse(vm.state.campusSwitchable, "case 2: no permitted entry -> no affordance")
+        assertEquals(emptyList<CampusOption>(), vm.state.campusChoices, "nothing unchangeable is ever offered")
+        assertEquals(locked, vm.state.campuses, "the names stay visible in the read-only line")
+        vm.selectCampus(35103)
+        assertEquals(1, data.policyUnids.size, "a read-only header cannot trigger a switch")
+    }
+
+    @Test
+    fun `matrix - a closed gate renders read-only even when the campuses allow it`() {
+        val data = FakeHomeData(policy(), campuses = CAMPUS_LIST, gate = false)
+        val vm = HomeViewModel(data, TOKEN, CURRENT_VERSION, DIRECT, FakeSecureStore())
+
+        vm.refresh()
+
+        assertFalse(vm.state.campusSwitchable, "case 3: openChangeCampus=false is decisive")
+        assertEquals(CAMPUS_LIST, vm.state.campusChoices, "the permitted entries are known, the gate is not")
+        vm.selectCampus(35103)
+        assertEquals(1, data.policyUnids.size, "a closed gate cannot switch")
+    }
+
+    @Test
+    fun `matrix - a failed gate fetch is conservative and stays read-only`() {
+        // Documented failure policy: no answer (transport/business error) reads as
+        // CLOSED — a hidden menu costs convenience, a false menu claims a switch the
+        // platform never granted.
+        val data = FakeHomeData(policy(), campuses = CAMPUS_LIST, gateFailure = true)
+        val vm = HomeViewModel(data, TOKEN, CURRENT_VERSION, DIRECT, FakeSecureStore())
+
+        vm.refresh()
+
+        assertFalse(vm.state.campusSwitchable, "no answer -> no affordance")
+        assertNull(vm.state.error, "a best-effort leg failure must not raise the error banner")
+        assertTrue(vm.state.rules.isNotEmpty(), "the risk-control facts must still render")
+        vm.selectCampus(35103)
+        assertEquals(listOf("35102"), data.policyUnids, "and no switch can happen either")
     }
 
     @Test
     fun `campus switch - picking another campus persists it and re-reads the policy for it`() {
         val selection = FakeCampusSelection()
-        val data = FakeHomeData(policy(), campuses = CAMPUS_LIST)
+        val data = FakeHomeData(policy(), campuses = CAMPUS_LIST, gate = true)
         val vm = HomeViewModel(
             data,
             TOKEN,
@@ -405,9 +491,43 @@ class HomeViewModelTest {
     }
 
     @Test
+    fun `display and execution agree - the run reads the campus Home just selected`() {
+        // One store shared by both ViewModels (MainActivity passes one instance), so the
+        // value selectCampus(B) writes on Home is literally what the run pipeline reads.
+        val selection = FakeCampusSelection()
+        val home = HomeViewModel(
+            FakeHomeData(policy(), campuses = CAMPUS_LIST, gate = true),
+            TOKEN,
+            CURRENT_VERSION,
+            DIRECT,
+            FakeSecureStore(),
+            campusSelection = selection,
+        )
+        home.refresh()
+        home.selectCampus(35103) // the user picks campus B in the Home dropdown
+
+        val stages = RecordingRunStages(policy())
+        val run = RunViewModel(
+            stages,
+            TOKEN,
+            DIRECT,
+            settleWaitMs = 0,
+            campusSelection = selection,
+        )
+        run.startRun(distanceM = 2030, durationSec = 760)
+
+        assertEquals(
+            listOf("35103"),
+            stages.selectUnids,
+            "the run's policy leg must carry the campus Home displays — no display/execution divergence",
+        )
+        assertEquals("90001", TOKEN.unid, "the session token itself stays untouched (settlement unchanged)")
+    }
+
+    @Test
     fun `campus switch - an id outside the account's own campuses is ignored`() {
         val selection = FakeCampusSelection()
-        val data = FakeHomeData(policy(), campuses = CAMPUS_LIST)
+        val data = FakeHomeData(policy(), campuses = CAMPUS_LIST, gate = true)
         val vm = HomeViewModel(
             data,
             TOKEN,
@@ -420,20 +540,13 @@ class HomeViewModelTest {
         vm.refresh()
         vm.selectCampus(99999)
 
-        assertNull(selection.value, "no blind write: only the listed campuses may be chosen")
+        assertEquals(
+            "35102",
+            selection.value,
+            "no blind write: the store keeps the effective campus, never an unknown id",
+        )
         assertEquals(35102, vm.state.selectedCampusUnid, "the effect stays where it was")
         assertEquals(1, data.policyUnids.size, "an ignored selection must not trigger a reload")
-    }
-
-    @Test
-    fun `single campus - the header stays a plain line with no dropdown state`() {
-        val data = FakeHomeData(policy(), campuses = CAMPUS_LIST.take(1))
-        val vm = HomeViewModel(data, TOKEN, CURRENT_VERSION, DIRECT, FakeSecureStore())
-
-        vm.refresh()
-
-        assertFalse(campusSwitchable(vm.state.campuses), "one campus must never render a menu")
-        assertEquals(35102, vm.state.selectedCampusUnid, "the only campus is still the one in effect")
     }
 
     @Test
@@ -458,14 +571,15 @@ class HomeViewModelTest {
         assertNull(vm.state.error, "a best-effort leg failure must not raise the error banner")
         assertTrue(vm.state.rules.isNotEmpty(), "rules must still render")
         assertEquals(emptyList<CampusOption>(), vm.state.campuses, "no answer -> no menu state")
+        assertFalse(vm.state.campusSwitchable, "no answer -> no affordance")
         assertEquals(listOf("35103"), data.policyUnids, "the persisted choice keeps applying")
         assertEquals("35103", selection.value, "the failure must not clear the user's choice")
     }
 
     @Test
-    fun `stale campus choice - dropped once the platform stops listing it`() {
+    fun `stale campus choice - replaced by the platform's own campus once it stops listing it`() {
         val selection = FakeCampusSelection(value = "99999")
-        val data = FakeHomeData(policy(), campuses = CAMPUS_LIST)
+        val data = FakeHomeData(policy(), campuses = CAMPUS_LIST, gate = true)
         val vm = HomeViewModel(
             data,
             TOKEN,
@@ -477,7 +591,7 @@ class HomeViewModelTest {
 
         vm.refresh()
 
-        assertNull(selection.value, "a choice the platform no longer offers must self-heal")
+        assertEquals("35102", selection.value, "store ≡ effective: the stale id is replaced, not kept")
         assertEquals(listOf("35102"), data.policyUnids, "the platform's own campus takes over")
     }
 
@@ -485,7 +599,7 @@ class HomeViewModelTest {
     fun `logout - clears the persisted campus choice with the session`() {
         val selection = FakeCampusSelection(value = "35103")
         val vm = HomeViewModel(
-            FakeHomeData(policy(), campuses = CAMPUS_LIST),
+            FakeHomeData(policy(), campuses = CAMPUS_LIST, gate = true),
             TOKEN,
             CURRENT_VERSION,
             DIRECT,
@@ -500,14 +614,38 @@ class HomeViewModelTest {
     }
 
     @Test
-    fun `campus helpers - a real choice, and a missing list keeps the stored choice`() {
-        assertFalse(campusSwitchable(emptyList()), "no answer is never a menu")
-        assertFalse(campusSwitchable(CAMPUS_LIST.take(1)), "one campus is not a menu")
-        assertTrue(campusSwitchable(CAMPUS_LIST), "two campuses are a real choice")
+    fun `campus helpers - the full behavior matrix and the effective-unid rules`() {
+        val allowed = CAMPUS_LIST
+        val locked = CAMPUS_LIST.map { it.copy(allowChange = false) }
 
+        // case 1: no choice
+        assertFalse(campusSwitchable(emptyList(), gateOpen = true, selectedUnid = null), "no answer is never a menu")
+        assertFalse(campusSwitchable(allowed.take(1), gateOpen = true, selectedUnid = null), "one campus is not a menu")
+        // case 2: nothing the platform permits
+        assertFalse(campusSwitchable(locked, gateOpen = true, selectedUnid = 35102), "all unchangeable -> read-only")
+        // case 3: gate not granted
+        assertFalse(campusSwitchable(allowed, gateOpen = false, selectedUnid = 35102), "gate closed -> read-only")
+        // case 4: the real thing
+        assertTrue(campusSwitchable(allowed, gateOpen = true, selectedUnid = 35102), "several + permitted + open")
+        // no-op guard: the only permitted campus is already the one in effect
+        val onlyCurrentPermitted = listOf(allowed[0], allowed[1].copy(allowChange = false))
+        assertFalse(
+            campusSwitchable(onlyCurrentPermitted, gateOpen = true, selectedUnid = 35102),
+            "a menu whose only entry is already in effect is not a choice",
+        )
+
+        // choices: only the platform's permitted entries are ever offered
+        assertEquals(listOf(35102, 35103), campusChoices(allowed).map { it.unid })
+        assertEquals(listOf(35102), campusChoices(onlyCurrentPermitted).map { it.unid })
+
+        // effective unid: persisted choice > platform default > session default
         assertEquals(35103, effectiveCampusUnid(35103, null), "a list failure keeps the persisted choice")
         assertEquals(35102, effectiveCampusUnid(null, CAMPUS_LIST), "the platform's isSelected campus wins")
         assertEquals(35102, effectiveCampusUnid(99999, CAMPUS_LIST), "an id the platform dropped is ignored")
+        assertNull(
+            effectiveCampusUnid(null, listOf(CAMPUS_LIST[1].copy(isSelected = false))),
+            "no choice and no platform default -> session unid",
+        )
         assertNull(effectiveCampusUnid(null, emptyList()), "no campuses and no choice -> session default")
         assertNull(effectiveCampusUnid(35103, emptyList()), "an empty list is a real answer: no override")
     }
@@ -535,6 +673,8 @@ class HomeViewModelTest {
         private val semesterFailure: Boolean = false,
         private val campuses: List<CampusOption>? = null,
         private val campusFailure: Boolean = false,
+        private val gate: Boolean? = null,
+        private val gateFailure: Boolean = false,
     ) : HomeData {
         /** Every unid the policy leg was asked to read — pins which campus's rule was fetched. */
         val policyUnids = mutableListOf<String>()
@@ -553,6 +693,10 @@ class HomeViewModelTest {
 
         override fun fetchCampuses(token: Token): List<CampusOption>? =
             if (campusFailure) throw java.io.IOException("campus transport failed") else campuses
+
+        /** `gate = null` mirrors the defaulted seam (no answer → conservatively closed). */
+        override fun fetchCampusGate(token: Token): Boolean? =
+            if (gateFailure) throw java.io.IOException("gate transport failed") else gate
     }
 
     /** [CampusSelectionStore] fake: records the persisted choice like the Android impl. */
@@ -569,6 +713,38 @@ class HomeViewModelTest {
             clears++
             value = null
         }
+    }
+
+    /**
+     * [RunStages] fake that records only what this batch cares about: which campus the
+     * run's policy leg was asked to read. Every other leg is inert (no network, no
+     * submission — the pipeline may refuse the empty synthetic track at the validator,
+     * which is fine: the policy leg already ran).
+     */
+    private class RecordingRunStages(private val policy: RunPolicy) : RunStages {
+        val selectUnids = mutableListOf<String>()
+
+        override fun syncSkewMs(): Long = 0L
+
+        override fun fetchPolicy(token: Token, selectUnid: String): RunPolicy {
+            selectUnids += selectUnid
+            return policy
+        }
+
+        override fun synthesize(policy: RunPolicy, distanceM: Int, durationSec: Int, seed: Long): List<TrackPoint> =
+            emptyList()
+
+        override fun upload(token: Token, track: List<TrackPoint>): UploadHandle = UploadHandle(
+            uid = "12345678",
+            unid = "90001",
+            uuid = "00000000-0000-0000-0000-000000000000",
+            startTimeMs = 1_700_000_000_000L,
+            stopTimeMs = 1_700_000_000_000L + 760_000L,
+        )
+
+        override fun settle(policy: RunPolicy, track: List<TrackPoint>, handle: UploadHandle): String? = "9001"
+
+        override fun latestHistory(token: Token): RunRecord? = null
     }
 
     /**

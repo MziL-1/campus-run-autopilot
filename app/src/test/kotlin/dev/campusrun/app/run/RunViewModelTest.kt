@@ -1,6 +1,8 @@
 package dev.campusrun.app.run
 
 import dev.campusrun.app.session.SessionEpoch
+import dev.campusrun.core.campus.CampusSelectionStore
+import dev.campusrun.core.campus.InMemoryCampusSelectionStore
 import dev.campusrun.core.policy.RunPolicy
 import dev.campusrun.core.policy.RunPolicyValidator
 import dev.campusrun.core.session.Token
@@ -241,6 +243,50 @@ class RunViewModelTest {
         assertEquals(1, fake.uploadCalls, "the fresh pipeline must upload exactly once")
     }
 
+    @Test
+    fun `campus selection - the run policy leg carries the campus Home selected`() {
+        // Exactly the value HomeViewModel.selectCampus(35103) persists into the store
+        // MainActivity shares with this ViewModel (display/execution agreement).
+        val store = object : CampusSelectionStore {
+            override fun load(): String? = "35103"
+            override fun save(unid: String) = Unit
+            override fun clear() = Unit
+        }
+        val fake = FakeRunStages(
+            policy = policy(),
+            track = track(distanceM = 2030, durationSec = 760),
+        )
+        val vm = RunViewModel(fake, TOKEN, DIRECT, settleWaitMs = 0, campusSelection = store)
+
+        vm.startRun(distanceM = 2030, durationSec = 760)
+
+        assertEquals(
+            listOf("35103"),
+            fake.selectUnids,
+            "the run must read the rule for the campus Home displays (selectUnid)",
+        )
+        assertEquals("90001", TOKEN.unid, "the session token stays untouched — settlement keeps the login unid")
+    }
+
+    @Test
+    fun `campus selection - with no selection the run keeps the session unid`() {
+        val fake = FakeRunStages(
+            policy = policy(),
+            track = track(distanceM = 2030, durationSec = 760),
+        )
+        val vm = RunViewModel(
+            fake,
+            TOKEN,
+            DIRECT,
+            settleWaitMs = 0,
+            campusSelection = InMemoryCampusSelectionStore(),
+        )
+
+        vm.startRun(distanceM = 2030, durationSec = 760)
+
+        assertEquals(listOf("90001"), fake.selectUnids, "no persisted choice -> the session unid")
+    }
+
     /** No advertised window (both hours 0) so the validator's wall-clock check cannot flake. */
     private fun policy() = RunPolicy(
         requiredPoints = emptyList(),
@@ -284,7 +330,13 @@ class RunViewModelTest {
 
         override fun syncSkewMs(): Long = 0L
 
-        override fun fetchPolicy(token: Token): RunPolicy = policy
+        /** Every `selectUnid` the policy leg was asked to read — pins the campus in effect. */
+        val selectUnids = mutableListOf<String>()
+
+        override fun fetchPolicy(token: Token, selectUnid: String): RunPolicy {
+            selectUnids += selectUnid
+            return policy
+        }
 
         override fun synthesize(policy: RunPolicy, distanceM: Int, durationSec: Int, seed: Long): List<TrackPoint> = track
 

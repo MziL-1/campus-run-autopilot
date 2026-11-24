@@ -68,6 +68,20 @@ data class HomeUiState(
     val campuses: List<CampusOption> = emptyList(),
     /** The campus Home currently reads the rule for (persisted choice, else the platform's `isSelected`); `null` = session default. */
     val selectedCampusUnid: Int? = null,
+    /**
+     * The campuses the menu may offer — only the platform's `allowChange = true` entries
+     * ([dev.campusrun.app.home.campusChoices]), so a campus the platform marks as not
+     * changeable is never presented as a switchable option.
+     */
+    val campusChoices: List<CampusOption> = emptyList(),
+    /**
+     * Whether the header renders the switch affordance at all. True only when **both**
+     * platform signals allow it: more than one campus, at least one `allowChange = true`
+     * entry that is not already in effect, AND the `openChangeCampus` gate answered `true`
+     * (conservative: a failed/absent gate read leaves it false). Everything else renders
+     * the plain campus/school line — names stay visible, no dead menu.
+     */
+    val campusSwitchable: Boolean = false,
     /** 当前已完成的里程 — counted (计入成绩) client-side sum of the fetched page, scope-labeled. */
     val cumulativeLine: String = "",
     /** Newest record, objective fields + the server-sourced badge; `""` when there is no record. */
@@ -99,6 +113,13 @@ interface HomeData {
      * pre-campus call sites keep compiling against the unchanged contract.
      */
     fun fetchCampuses(token: Token): List<CampusOption>? = null
+
+    /**
+     * The platform's switch permission (`openChangeCampus`); `null` = no answer.
+     * Defaulted to `null` (no answer) so an un-updated seam is **conservatively closed** —
+     * see [dev.campusrun.app.home.campusSwitchable].
+     */
+    fun fetchCampusGate(token: Token): Boolean? = null
 }
 
 /**
@@ -184,20 +205,28 @@ class HomeViewModel(
                 // token into the shared ApiClient at leg entry, so a leg started after
                 // the drop would resurrect the cleared credentials.
                 if (loggedOut) return@execute
-                // Campus leg (best-effort like the profile leg): the persisted choice is
-                // local, the list is the platform's — either may be absent without
-                // failing the risk-control facts below.
+                // Campus legs (best-effort like the profile leg): the persisted choice is
+                // local, the list and the switch gate are the platform's — none of them
+                // may fail the risk-control facts below.
                 val campuses = runCatching { data.fetchCampuses(token) }.getOrNull()
                 if (loggedOut) return@execute
+                // Platform permission #2 (`openChangeCampus`): `null` = no answer, and the
+                // policy is CONSERVATIVE — anything but a positive `true` leaves the
+                // affordance off (see campusSwitchable). Offering a switch the platform
+                // never granted would be the false claim this leg exists to prevent.
+                val gate = runCatching { data.fetchCampusGate(token) }.getOrNull()
+                if (loggedOut) return@execute
                 val stored = campusSelection.load()?.toIntOrNull()
-                // Self-heal: a choice the platform no longer lists is dropped, but only
-                // when we actually got a list (`null` = no answer → keep the choice).
-                if (stored != null && campuses != null &&
-                    campuses.isNotEmpty() && campuses.none { it.unid == stored }
-                ) {
-                    campusSelection.clear()
-                }
                 val effective = effectiveCampusUnid(stored, campuses)
+                // Store ≡ effective after every refresh (this also drops a choice the
+                // platform no longer lists, and pins the platform's own `isSelected`
+                // default when the user never chose): the run pipeline reads this SAME
+                // value (CoreRunStages.fetchPolicy), so the campus Home displays and the
+                // campus the run executes against cannot diverge.
+                if (effective != stored) {
+                    if (effective == null) campusSelection.clear()
+                    else campusSelection.save(effective.toString())
+                }
                 if (loggedOut) return@execute
                 // The campus choice reaches the wire ONLY as the policy leg's unid
                 // (upstream `selectUnid`/`selectedUnid`); the session token is not
@@ -217,14 +246,17 @@ class HomeViewModel(
                 // degrades to the counted page sum, never fails the refresh.
                 val serverCountedM = runCatching { data.fetchCountedSemester(token) }.getOrNull()
                 if (loggedOut) return@execute
+                val campusList = campuses.orEmpty()
                 state = HomeUiState(
                     loading = false,
                     rules = ruleLines(policy),
                     requirementLine = requirementText(policy),
                     schoolName = profile?.schoolName.orEmpty(),
                     nickname = profile?.displayName.orEmpty(),
-                    campuses = campuses.orEmpty(),
+                    campuses = campusList,
                     selectedCampusUnid = effective,
+                    campusChoices = campusChoices(campusList),
+                    campusSwitchable = campusSwitchable(campusList, gate == true, effective),
                     cumulativeLine = cumulativeText(history, serverCountedM),
                     latestLine = latestText(history.firstOrNull()),
                     historyRows = history.map(::historyRowText),
@@ -236,8 +268,11 @@ class HomeViewModel(
     }
 
     /**
-     * 校区切换 (campus switcher): the dropdown only ever offers the account's OWN
-     * campuses from the last refresh, so an out-of-list id is ignored (no blind write).
+     * 校区切换 (campus switcher): the menu is rendered only while [HomeUiState.campusSwitchable]
+     * holds, i.e. both platform signals allowed the switch (`size > 1` + an
+     * `allowChange = true` entry + the `openChangeCampus` gate open) — and this action
+     * re-checks them, so a stale or programmatic call can never pick a campus the
+     * platform marks as not changeable or write an id outside the account's list.
      *
      * The choice is persisted first (a refresh or an app restart keeps it) and then the
      * whole Home reload runs — policy first, so the new campus's rule/points are what
@@ -246,7 +281,7 @@ class HomeViewModel(
      */
     fun selectCampus(unid: Int) {
         if (loggedOut) return
-        if (!campusSwitchable(state.campuses) || state.campuses.none { it.unid == unid }) return
+        if (!state.campusSwitchable || state.campusChoices.none { it.unid == unid }) return
         campusSelection.save(unid.toString())
         refresh()
     }
@@ -445,16 +480,44 @@ class CoreHomeData(private val api: ApiClient) : HomeData {
     override fun fetchCountedSemester(token: Token): Int? = SemesterSummaryClient(api).countedMeters(token)
 
     override fun fetchCampuses(token: Token): List<CampusOption>? = CampusClient(api).fetch(token)
+
+    override fun fetchCampusGate(token: Token): Boolean? = CampusClient(api).fetchGate(token)
 }
 
 /**
- * The dropdown is offered **only** for a real choice (brief: keep it honest — a single
- * campus renders the plain profile line, never a menu that cannot go anywhere).
+ * The campuses the switch menu may offer: upstream `allowChange = true` **only** — the
+ * platform's per-campus permission is honored entry by entry, so a campus it marks as
+ * not changeable is never rendered as a switchable option ([CampusOption.allowChange]).
  */
-internal fun campusSwitchable(campuses: List<CampusOption>): Boolean = campuses.size > 1
+internal fun campusChoices(campuses: List<CampusOption>): List<CampusOption> =
+    campuses.filter { it.allowChange }
 
 /**
- * Which campus's rule the policy leg should read:
+ * Whether the header offers the switch affordance — **both** platform signals must say
+ * yes, and the menu must contain at least one real action:
+ *
+ * | # | Condition | Result |
+ * | --- | --- | --- |
+ * | 1 | one campus (or none / no answer) | plain line — no affordance |
+ * | 2 | several campuses, all `allowChange = false` | read-only: names visible, no menu |
+ * | 3 | `openChangeCampus` gate closed **or not answered** (fetch failed) | read-only — conservative: we never offer a switch the platform did not grant |
+ * | 4 | several campuses + a permitted entry + gate open | dropdown |
+ *
+ * The extra "an offered entry differs from the one in effect" check keeps the menu free
+ * of no-op items (a single permitted campus that IS the current one is not a choice).
+ */
+internal fun campusSwitchable(
+    campuses: List<CampusOption>,
+    gateOpen: Boolean,
+    selectedUnid: Int?,
+): Boolean {
+    if (!gateOpen) return false // platform gate (openChangeCampus) must be positively granted
+    if (campuses.size < 2) return false // one campus is not a choice
+    return campusChoices(campuses).any { it.unid != selectedUnid }
+}
+
+/**
+ * Which campus's rule the policy leg (Home **and** the run pipeline) should read:
  *
  * 1. the persisted choice while the platform still lists it (survives refresh/restart);
  * 2. otherwise the platform's own `isSelected` campus;
@@ -463,6 +526,10 @@ internal fun campusSwitchable(campuses: List<CampusOption>): Boolean = campuses.
  * [campuses] is `null` when the list leg gave no answer: the persisted choice is then
  * kept (a transient failure must not silently move the user back to another campus),
  * while a real empty list yields `null` (the platform reports no campuses at all).
+ *
+ * The refresh writes the result back to the store whenever it differs (see
+ * `HomeViewModel.refresh`), so **store ≡ effective** and `CoreRunStages` — which reads
+ * the store — always executes against the same campus Home displays.
  */
 internal fun effectiveCampusUnid(stored: Int?, campuses: List<CampusOption>?): Int? {
     campuses ?: return stored

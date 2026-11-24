@@ -43,9 +43,26 @@ class CampusClient(val api: ApiClient) {
         return parseCampusList(api.get("$ZONELIST_PATH?unid=${token.unid}"))
     }
 
+    /**
+     * The platform's switch permission: upstream `CommonServer.getIsSwitchSchool`
+     * (`@GET("api/v70103/university/getUserInformation")` → `BasicBean<ChangeCampusBean>`,
+     * DEX-recovered like [fetch]) — `data.openChangeCampus` is the account-level gate.
+     *
+     * `true` only when the platform **positively** grants it; a business error, a missing
+     * `data` or a transport failure returns `null`, and the caller treats anything but
+     * `true` as closed (conservative: never offer a switch the platform did not grant).
+     */
+    fun fetchGate(token: Token): Boolean? {
+        api.setCredentials(token.uid, token.value)
+        return parseCampusGate(api.get(GATE_PATH))
+    }
+
     private companion object {
         /** Upstream `CommonServer.getMyCampusList` path (7.4.0 DEX annotation value). */
         const val ZONELIST_PATH = "/api/v61101/campus/zonelist"
+
+        /** Upstream `CommonServer.getIsSwitchSchool` path (7.4.0 DEX annotation value). */
+        const val GATE_PATH = "/api/v70103/university/getUserInformation"
     }
 }
 
@@ -83,6 +100,28 @@ internal fun parseCampusList(payload: JsonElement): List<CampusOption>? {
 }
 
 private const val BUSINESS_SUCCESS = 10000L
+
+/**
+ * Pure parser for the `getUserInformation` envelope: `openChangeCampus` is a primitive
+ * `boolean` upstream (`ChangeCampusBean`), so a **missing key reads as `false`** — exactly
+ * what the official client's Gson default produces; only an envelope that answers nothing
+ * (business error / `data` absent or null) yields `null` ("no answer"). A structurally
+ * wrong document (non-object root, non-object `data`) throws [IllegalArgumentException].
+ */
+internal fun parseCampusGate(payload: JsonElement): Boolean? {
+    val root = payload as? JsonObject
+        ?: throw IllegalArgumentException(
+            "campus gate response must be a JSON object, got ${payload::class.java.simpleName}",
+        )
+    if (root.longField("error") != BUSINESS_SUCCESS) return null
+    val data = root["data"] ?: return null
+    if (data is JsonNull) return null
+    val gate = data as? JsonObject
+        ?: throw IllegalArgumentException(
+            "campus gate data must be a JSON object, got ${data::class.java.simpleName}",
+        )
+    return gate.boolField("openChangeCampus") ?: false
+}
 
 private fun JsonObject.longField(key: String): Long? {
     val value = this[key] ?: return null

@@ -5,6 +5,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import dev.campusrun.app.session.SessionEpoch
 import dev.campusrun.core.api.ApiClient
+import dev.campusrun.core.campus.CampusSelectionStore
+import dev.campusrun.core.campus.InMemoryCampusSelectionStore
 import dev.campusrun.core.config.ProtocolParams
 import dev.campusrun.core.crypto.NetSecKit
 import dev.campusrun.core.crypto.Signer
@@ -71,7 +73,13 @@ interface RunStages {
     /** Server clock skew from [TimeSync] (ms; caller applies it to the submission instant). */
     fun syncSkewMs(): Long
 
-    fun fetchPolicy(token: Token): RunPolicy
+    /**
+     * @param selectUnid the campus whose rule to read — the persisted campus choice
+     *   (Home's dropdown) resolved by [RunViewModel], defaulting to the session unid.
+     *   It reaches the wire as `runModePolicy.selectUnid` and the five-point
+     *   `selectedUnid` (PolicyClient), so display and execution use the same campus.
+     */
+    fun fetchPolicy(token: Token, selectUnid: String = token.unid): RunPolicy
 
     fun synthesize(policy: RunPolicy, distanceM: Int, durationSec: Int, seed: Long): List<TrackPoint>
 
@@ -110,6 +118,13 @@ class RunViewModel(
     private val log: (String) -> Unit = {},
     /** Upstream waits before the history read-back; tests pass 0 for determinism. */
     private val settleWaitMs: Long = 1_500,
+    /**
+     * The persisted campus choice — the SAME store Home writes (MainActivity passes one
+     * shared instance), so the campus Home displays and the campus this run executes
+     * against are always the one value (display/execution agreement). Not a credential;
+     * only the policy leg's `selectUnid` follows it, never the session [Token].
+     */
+    private val campusSelection: CampusSelectionStore = InMemoryCampusSelectionStore(),
 ) {
 
     var state: RunState by mutableStateOf(RunState.Idle)
@@ -149,9 +164,16 @@ class RunViewModel(
             val skewMs = stages.syncSkewMs()
             log("sync: server clock skew $skewMs ms")
 
-            val policy = stages.fetchPolicy(token)
+            // Display/execution agreement: the run reads the SAME persisted campus Home
+            // displays (Home syncs the store to the effective campus on every refresh),
+            // so a selectCampus(B) on Home is what this policy and its five-point query
+            // are read for. No selection keeps the session unid. It reaches the wire only
+            // as `selectUnid`/`selectedUnid` — the session token is never rewritten, so
+            // settlement keeps the login unid (no Settlement change).
+            val selectUnid = campusSelection.load()?.takeIf { it.isNotBlank() } ?: token.unid
+            val policy = stages.fetchPolicy(token, selectUnid)
             log(
-                "rule: window ${policy.validFromHour}-${policy.validToHour} h, " +
+                "rule: campus unid $selectUnid, window ${policy.validFromHour}-${policy.validToHour} h, " +
                     "pace ${policy.paceMinSecPerKm}-${policy.paceMaxSecPerKm} s/km, " +
                     "minDistance ${policy.minDistancePerRunM} m, dayGoal ${policy.maxDistancePerRunM} m, " +
                     "dailyLimit ${policy.dailyRunLimit}",
@@ -377,7 +399,15 @@ class CoreRunStages(
 
     override fun syncSkewMs(): Long = timeSync.serverOffsetMs()
 
-    override fun fetchPolicy(token: Token): RunPolicy = PolicyClient(api).fetch(token, mode = 1)
+    /**
+     * The campus arrives from [RunViewModel], which resolves the persisted selection
+     * Home writes — so the run executes against the campus Home displays. [PolicyClient]
+     * sends this ONE value as `runModePolicy.selectUnid` **and** the five-point
+     * `selectedUnid`, and the session [Token] is never rewritten (settlement keeps the
+     * login unid — no Settlement change).
+     */
+    override fun fetchPolicy(token: Token, selectUnid: String): RunPolicy =
+        PolicyClient(api).fetch(token, mode = 1, selectUnid = selectUnid)
 
     override fun synthesize(policy: RunPolicy, distanceM: Int, durationSec: Int, seed: Long): List<TrackPoint> =
         TrackSynthesizer.synthesize(policy, distanceM, durationSec, seed)

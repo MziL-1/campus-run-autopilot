@@ -278,6 +278,36 @@ class PolicyClientTest {
     }
 
     @Test
+    fun `fetch threads the campus selectUnid into the policy and the five-point bodies`() {
+        // The campus switch reaches BOTH rule reads through this one argument, so the
+        // run executes against the campus Home displays (display/execution agreement).
+        val paths = mutableListOf<String>()
+        val requestBodies = mutableMapOf<String, String>()
+        val api = apiServing(
+            mapOf(
+                "/api/v70103/runModePolicy" to policyEnvelope(fixtureText("run_mode_policy.json")),
+                "/api/v1/getGeoFenceForRun" to fixtureText("geo_fence.json"),
+                "/api/v560/get/1/distance/2000" to fivePointResponse(
+                    """[{"lat":30.0010,"lon":120.0010,"isFixed":1,"pointName":"A"}]""",
+                ),
+            ),
+            paths,
+            requestBodies,
+        )
+
+        PolicyClient(api).fetch(
+            Token("session-value", "uid-42", "90001", null),
+            mode = 1,
+            selectUnid = "35103",
+        )
+
+        val policy = decryptPostBody(requestBodies.getValue("/api/v70103/runModePolicy"), protocolParams())
+        assertEquals(35103, policy.getValue("selectUnid").jsonPrimitive.content.toInt(), "policy selectUnid")
+        val checkpoint = decryptPostBody(requestBodies.getValue("/api/v560/get/1/distance/2000"), protocolParams())
+        assertEquals(35103, checkpoint.getValue("selectedUnid").jsonPrimitive.content.toInt(), "five-point unid")
+    }
+
+    @Test
     fun `fetch five-point business error leaves checkpoints empty but still called`() {
         val paths = mutableListOf<String>()
         val api = apiServing(

@@ -86,25 +86,29 @@ fun HomeScreen(
 
         // 当前校园名 (brief item 1): from the read-only user/info leg — the user's OWN
         // school name (and optional nickname), on-device only. Blank until the profile
-        // leg lands; blank-on-failure shows nothing rather than inventing a school.
+        // leg lands; blank-on-failure shows nothing rather than inventing a school. When a
+        // campus is in effect (persisted choice, else the platform's `isSelected`) its name
+        // is what the rule is read for, so that is the name shown.
         //
-        // 校区下拉: only when the platform's own `zonelist` returns MORE than one campus
-        // (a single campus stays the plain line — no affordance that cannot go anywhere);
-        // picking an item persists the choice and re-reads the rule for that campus.
-        val campusOptions = state.campuses
-        if (campusSwitchable(campusOptions)) {
-            var menuOpen by remember(campusOptions, state.selectedCampusUnid) {
+        // 校区下拉: only while BOTH platform signals allow it (see HomeUiState.campusSwitchable
+        // — >1 campus, an allowChange=true entry, and the openChangeCampus gate open). A
+        // single campus, an all-false list or an ungranted/failed gate keeps the plain line
+        // (names visible, no affordance that cannot go anywhere). Picking an item persists
+        // the choice and re-reads the rule for that campus — the run pipeline reads the
+        // same persisted choice, so display and execution agree.
+        val campusName = state.campuses
+            .firstOrNull { it.unid == state.selectedCampusUnid }
+            ?.name
+            ?: state.schoolName.ifEmpty { state.campuses.firstOrNull()?.name.orEmpty() }
+        if (state.campusSwitchable) {
+            var menuOpen by remember(state.campusChoices, state.selectedCampusUnid) {
                 mutableStateOf(false)
             }
-            val selectedName = campusOptions
-                .firstOrNull { it.unid == state.selectedCampusUnid }
-                ?.name
-                ?: state.schoolName.ifEmpty { campusOptions.first().name }
             Box {
                 Text(
                     buildString {
                         append("当前校园：")
-                        append(selectedName)
+                        append(campusName)
                         if (state.nickname.isNotEmpty()) append(" · ${state.nickname}")
                         append(" ▾")
                     },
@@ -117,7 +121,8 @@ fun HomeScreen(
                     expanded = menuOpen,
                     onDismissRequest = { menuOpen = false },
                 ) {
-                    campusOptions.forEach { campus ->
+                    // Only allowChange=true entries — never a switch the platform marks unavailable.
+                    state.campusChoices.forEach { campus ->
                         val isCurrent = campus.unid == state.selectedCampusUnid
                         DropdownMenuItem(
                             text = {
@@ -131,11 +136,11 @@ fun HomeScreen(
                     }
                 }
             }
-        } else if (state.schoolName.isNotEmpty()) {
+        } else if (campusName.isNotEmpty()) {
             Text(
                 buildString {
                     append("当前校园：")
-                    append(state.schoolName)
+                    append(campusName)
                     if (state.nickname.isNotEmpty()) append(" · ${state.nickname}")
                 },
                 style = MaterialTheme.typography.titleMedium,
@@ -287,8 +292,9 @@ fun HomeScreen(
                 )
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "校区下拉仅切换本工具读取规则与点位时使用的校区标识（selectUnid），" +
-                        "不修改平台账号登记的校区；平台侧校区变更请以官方 App 为准。",
+                    "校区下拉只改变本工具读取规则与点位所用的校区标识（selectUnid，首页与跑步执行" +
+                        "读同一份选择），不修改平台账号登记的校区；平台未开放切换时下拉不显示，" +
+                        "平台侧校区变更请以官方 App 为准。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

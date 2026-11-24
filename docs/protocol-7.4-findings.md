@@ -185,11 +185,16 @@ SHAPE history.calendar_list code=-10000 message="ERROR" data=NoneType
   构造代码位于 base dex 段（各版本 `dump_exact_0/base` 的头表都被截断，`code_off=0`），
   因此 `updatezone` 的入参形态本轮**未知**，也未在线试写。
 
-**本轮实现取舍**：读端点 `campus/zonelist` 按上表移植为 `CampusClient`（只读，安全）；
+**本轮实现取舍**：读端点 `campus/zonelist` 按上表移植为 `CampusClient`（只读，安全），
+**两个「允许切换」信号都真实接入**：① 列表里的 `allowChange=false` 条目一律不进菜单；
+② `getUserInformation` 的 `openChangeCampus` 每次刷新都拉取并检查，**取不到（业务错/网络失败）
+按「未开放」保守处理**——宁可不显示下拉，也不显示平台没批准的切换。下拉可点的条件是
+「校区数 > 1 + 存在 `allowChange=true` 且与当前不同的校区 + 闸门为 true」，其余情况只显示静态校区名。
 切换只改**读规则用的 `selectUnid`/`selectedUnid`**（Task 6 既有字段）并持久化本地选择，
-**不调用 `updatezone`**（入参未知 + 属写操作，灰度提交日不碰账号状态），
-About 区明示「不修改平台账号登记的校区」。校区列表的真实响应形状（信封/字段名）
-尚未线上核对，属**未验证项**（见 §6）。
+**跑步执行链路读同一份持久化选择**（`RunViewModel` → `fetchPolicy(token, selectUnid)`），
+因此首页显示的校区与实际执行取规则的校区一致；**不调用 `updatezone`**（入参未知 + 属写操作，
+灰度提交日不碰账号状态），About 区明示「不修改平台账号登记的校区、平台未开放切换时下拉不显示」。
+校区列表与闸门的真实响应形状（信封/字段名）尚未线上核对，属**未验证项**（见 §6）。
 
 ---
 

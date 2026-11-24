@@ -4,6 +4,7 @@ import dev.campusrun.core.api.ApiClient
 import dev.campusrun.core.config.ProtocolParams
 import dev.campusrun.core.session.Token
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -83,6 +84,50 @@ class CampusClientTest {
         assertEquals(2, campuses!!.size)
         assertTrue(campuses.all { it.unid > 0 }, "every campus carries its unid")
     }
+
+    @Test
+    fun `switch gate reads openChangeCampus with the upstream Gson default for a missing key`() {
+        assertEquals(true, parseCampusGate(gate("""{"openChangeCampus":true}""")), "granted")
+        assertEquals(false, parseCampusGate(gate("""{"openChangeCampus":false}""")), "explicitly closed")
+        assertEquals(false, parseCampusGate(gate("{}")), "absent key = the official client's Gson boolean default")
+        // Gson's boolean adapter reads a numeric 1/0 as true/false (nextBoolean), so we do too.
+        assertEquals(true, parseCampusGate(gate("""{"openChangeCampus":1}""")), "the 1/0 spelling is accepted")
+        assertEquals(false, parseCampusGate(gate("""{"openChangeCampus":0}""")))
+    }
+
+    @Test
+    fun `switch gate reads an unanswered envelope as null and a wrong shape as an error`() {
+        assertNull(parseCampusGate(Json.parseToJsonElement("""{"error":50006,"message":"失败","data":{}}""")))
+        assertNull(parseCampusGate(Json.parseToJsonElement("""{"error":10000,"message":"成功"}""")))
+        assertNull(parseCampusGate(Json.parseToJsonElement("""{"error":10000,"message":"成功","data":null}""")))
+        assertThrows(IllegalArgumentException::class.java) {
+            parseCampusGate(Json.parseToJsonElement("[]"))
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            parseCampusGate(Json.parseToJsonElement("""{"error":10000,"data":[]}"""))
+        }
+    }
+
+    @Test
+    fun `fetch gate requests the upstream getUserInformation path without a query`() {
+        val paths = mutableListOf<String>()
+        val queries = mutableListOf<String?>()
+        val api = apiServing(
+            """{"error":10000,"message":"成功","data":{"openChangeCampus":true}}""",
+            paths,
+            queries,
+        )
+
+        assertEquals(true, CampusClient(api).fetchGate(TOKEN))
+
+        assertEquals(listOf("/api/v70103/university/getUserInformation"), paths, "upstream getIsSwitchSchool path")
+        assertEquals(listOf<String?>(null), queries, "the gate carries no unid parameter")
+        assertEquals("uid-42", api.uid, "the gate leg installs the session identity too")
+    }
+
+    /** Wraps `data` in the upstream BasicBean envelope the parser consumes. */
+    private fun gate(data: String): JsonElement =
+        Json.parseToJsonElement("""{"error":10000,"message":"成功","data":$data}""")
 
     private fun apiServing(body: String, paths: MutableList<String>, queries: MutableList<String?>): ApiClient {
         val client = OkHttpClient.Builder()

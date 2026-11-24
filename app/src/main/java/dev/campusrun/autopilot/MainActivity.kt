@@ -76,6 +76,12 @@ class MainActivity : ComponentActivity() {
         val tokenStore = AndroidTokenStore(this)
         val identity = resolveDeviceIdentity(tokenStore)
 
+        // ONE campus-selection store shared by Home and the run pipeline: the persisted
+        // choice is the single source of truth for which campus's rule is read, so the
+        // campus Home displays and the campus a run executes against cannot diverge.
+        // Not a credential (it only decides `selectUnid`) → plain SharedPreferences.
+        val campusSelection = AndroidCampusSelectionStore(this)
+
         // Bundled wire params overlaid with per-install keys (spec §5.6 hot-update seam;
         // the update channel itself lands in a later task).
         val paramsStore = ParamsStore(
@@ -231,9 +237,9 @@ class MainActivity : ComponentActivity() {
                                 // Shared with the global layer (double-prompt guard): Home
                                 // only views the prompt; MainActivity renders it.
                                 updatePromptState = updatePromptState,
-                                // Persisted campus choice (校区下拉): survives refresh and
-                                // app restart; dropped again on logout with the session.
-                                campusSelection = AndroidCampusSelectionStore(this),
+                                // Shared with the run pipeline (display/execution agree):
+                                // persisted campus choice, dropped again on logout.
+                                campusSelection = campusSelection,
                             )
                         }
                         val runVm = remember(token) {
@@ -244,6 +250,9 @@ class MainActivity : ComponentActivity() {
                                     diagLog.w("run", line)
                                     Log.i(TAG, "run> $line")
                                 },
+                                // The SAME store Home writes: the run reads the campus
+                                // Home displays (display/execution agreement).
+                                campusSelection = campusSelection,
                             )
                         }
                         // Logout: the VM dropped the session — return to the login screen
