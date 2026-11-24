@@ -31,12 +31,15 @@ import java.util.concurrent.Executors
  *   even when the full rule card is scanned past.
  * - [schoolName] / [nickname] come from the new read-only [ProfileClient] leg — the
  *   user's OWN school name and nickname, shown on-device only (PII rule: never the 真名).
- * - [cumulativeLine] is the **client-side sum of the fetched history page**, labeled
- *   `近N条累计` — the records response carries no server-side semester summary
- *   (findings §3.1 D), so it must never claim to be a semester total.
- * - [historyRows] renders the fetched rows (up to 20) as objective date/distance/duration
- *   lines — **no 达标/未达标 verdict**: our `valid` derivation diverges from the official
- *   scoring in both directions, so it must not be presented as fact.
+ * - [cumulativeLine] is the **counted** client-side sum of the fetched page — only the
+ *   official 达标 rows (`officialResult == true`, 计入成绩), scope-labeled `近N条` —
+ *   the records response carries no server-side semester summary (findings §3.1 D),
+ *   so it must never claim to be a semester total; rows without a verdict field are
+ *   disclosed (`已知 N 条计入…未知`) rather than guessed.
+ * - [historyRows] renders the fetched rows (up to 20) as date/distance/duration lines
+ *   plus the **server-sourced** 达标/未达标 badge ([HistoryEntry.officialResult],
+ *   correlated 5/5 vs the official app); rows without the field carry no badge —
+ *   our divergent `valid` is never displayed.
  * - [error] carries a sanitized load failure.
  *
  * The update prompt is NOT owned here — it lives in the shared
@@ -52,11 +55,11 @@ data class HomeUiState(
     val schoolName: String = "",
     /** Optional nickname (user's own, on-device); `""` when the server sends none. */
     val nickname: String = "",
-    /** 当前已完成的里程 — client-side sum of the fetched page, scope-labeled. */
+    /** 当前已完成的里程 — counted (计入成绩) client-side sum of the fetched page, scope-labeled. */
     val cumulativeLine: String = "",
-    /** Newest record, objective fields only; `""` when there is no record. */
+    /** Newest record, objective fields + the server-sourced badge; `""` when there is no record. */
     val latestLine: String = "",
-    /** 历史跑步记录 — one objective line per fetched row (date · distance · duration). */
+    /** 历史跑步记录 — one line per fetched row (date · distance · duration · 达标/未达标 badge). */
     val historyRows: List<String> = emptyList(),
     val error: String? = null,
 )
@@ -68,7 +71,7 @@ interface HomeData {
     /** Best-effort: `null` (or a thrown transport error) leaves the school name blank. */
     fun fetchProfile(token: Token): UserProfile?
 
-    /** Page 1 of history as objective rows; empty list when there is no history. */
+    /** Page 1 of history rows (objective fields + official verdict); empty list when there is no history. */
     fun fetchHistory(token: Token): List<HistoryEntry>
 }
 
@@ -257,36 +260,63 @@ internal fun requirementText(policy: RunPolicy): String {
 }
 
 /**
- * 当前已完成的里程 (brief item 3): the sum of the **fetched page's** rows, labeled with
- * that exact scope (`近N条累计`). The records API exposes no semester summary
- * (findings §3.1 D — `data` is a bare row array), so presenting this as a semester total
- * would fabricate completeness we do not have; the label keeps the claim honest.
- * An empty page is the empty-state copy, not a zero total.
+ * 当前已完成的里程 (brief item 3) — **counted only (计入成绩)**: the sum of the
+ * fetched page's **official 达标** rows ([HistoryEntry.officialResult] `true`, the
+ * server-scored verdict correlated 5/5 against the official app — see
+ * `HistoryClient`/`rowOfficialResult`), labeled with its exact scope (`近N条`) because
+ * the records API exposes no semester summary (findings §3.1 D — `data` is a bare row
+ * array), so presenting this as a semester total would fabricate completeness we do
+ * not have. An empty page is the empty-state copy, not a zero total.
+ *
+ * Honest fallbacks when the verdict field is absent (older/legacy rows):
+ * - some rows unknown → the counted sum plus `已知 N 条计入，M 条计分状态未知` —
+ *   unknown rows are disclosed, never silently counted or dropped;
+ * - all rows unknown → `未知` instead of a fabricated `0` total.
  */
 internal fun cumulativeText(rows: List<HistoryEntry>): String {
     if (rows.isEmpty()) return "暂无跑步记录"
-    val totalM = rows.sumOf { it.distanceM }
-    val distance = if (totalM >= 1000) {
-        String.format(Locale.ROOT, "%.2f km", totalM / 1000.0)
-    } else {
-        "$totalM m"
+    val counted = rows.filter { it.officialResult == true }
+    val unknown = rows.count { it.officialResult == null }
+    val distance = formatDistance(counted.sumOf { it.distanceM })
+    val scope = "近 ${rows.size} 条"
+    val head = "已完成（计入成绩，$scope）"
+    return when {
+        unknown == 0 -> "$head：$distance"
+        unknown == rows.size -> "$head：未知（全部 $unknown 条计分状态未知）"
+        else -> "$head：$distance（已知 ${counted.size} 条计入，$unknown 条计分状态未知）"
     }
-    return "已完成：近 ${rows.size} 条累计 $distance"
 }
 
+/** `totalM` → `2.03 km` at ≥1000 m, otherwise `800 m` (sub-km stays in meters). */
+private fun formatDistance(totalM: Int): String =
+    if (totalM >= 1000) String.format(Locale.ROOT, "%.2f km", totalM / 1000.0) else "$totalM m"
+
 /**
- * One 历史跑步记录 row (brief item 4): date · distance · duration, objective fields
- * only. Unknown `startTime`/`totalTime` degrade to explicit placeholders — printing
- * epoch 0 or a 0 s duration would state a fact we do not have.
+ * One 历史跑步记录 row (brief item 4): date · distance · duration, plus the
+ * **server-sourced** 达标/未达标 badge when the row carries an official verdict
+ * ([HistoryEntry.officialResult]); rows without the field carry no badge — a verdict
+ * we do not have must never be stated. Unknown `startTime`/`totalTime` degrade to
+ * explicit placeholders — printing epoch 0 or a 0 s duration would state a fact we do
+ * not have.
  */
 internal fun historyRowText(row: HistoryEntry): String =
-    "${rowDate(row.startTimeMs)} · ${row.distanceM} m · ${formatDuration(row.durationSec)}"
+    "${rowDate(row.startTimeMs)} · ${row.distanceM} m · ${formatDuration(row.durationSec)}${verdictBadge(row.officialResult)}"
 
-/** Newest record as one objective line; `""` when there is no record at all. */
+/**
+ * The official verdict badge: ` · 达标` / ` · 未达标` from the server's scoring field,
+ * `""` when the row carries no verdict (never a guess, never our divergent `valid`).
+ */
+internal fun verdictBadge(officialResult: Boolean?): String = when (officialResult) {
+    true -> " · 达标"
+    false -> " · 未达标"
+    null -> ""
+}
+
+/** Newest record as one objective line + the server-sourced badge; `""` when there is no record at all. */
 internal fun latestText(row: HistoryEntry?): String {
     if (row == null) return ""
     return "最近记录：id=${row.id} · ${rowDate(row.startTimeMs)} · " +
-        "${row.distanceM} m · ${formatDuration(row.durationSec)}"
+        "${row.distanceM} m · ${formatDuration(row.durationSec)}${verdictBadge(row.officialResult)}"
 }
 
 /** `totalTime` seconds → `m:ss` under an hour, `h:mm:ss` above; unknown stays unknown. */

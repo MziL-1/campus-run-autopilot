@@ -23,8 +23,9 @@ import java.util.concurrent.TimeUnit
  *
  * - `历史为空 → 空态文案`
  * - `profile → 当前校园名` (the read-only user/info leg surfaces the user's own school)
- * - `verdict removal → 达标/未达标 must never render` (our `valid` diverges from the
- *   official scoring in both directions, so it cannot be presented as fact)
+ * - `history present → counted cumulative + server-sourced badges` (计入成绩 sums only
+ *   official 达标 rows; rows render the server's 达标/未达标 badge — our divergent
+ *   `valid` never renders)
  * - `update required → 提示态` (the startup `UpdateChecker` result is fed in through
  *   [HomeViewModel.onVersionCheck]; a required bump raises a non-blocking prompt state)
  *
@@ -49,25 +50,34 @@ class HomeViewModelTest {
     }
 
     @Test
-    fun `history present - progress shows the scope-labeled cumulative and objective rows`() {
+    fun `history present - progress shows the counted cumulative and badge-bearing rows`() {
+        // The account's real page shape: two official 达标, three official 不达标.
         val rows = listOf(
-            HistoryEntry(id = "9001", startTimeMs = PAST_MS, distanceM = 2030, durationSec = 760),
-            HistoryEntry(id = "9000", startTimeMs = PAST_MS, distanceM = 1500, durationSec = 600),
+            HistoryEntry(id = "1373345979", startTimeMs = PAST_MS, distanceM = 2030, durationSec = 760, officialResult = true),
+            HistoryEntry(id = "1371833451", startTimeMs = PAST_MS, distanceM = 2009, durationSec = 700, officialResult = true),
+            HistoryEntry(id = "1370876678", startTimeMs = PAST_MS, distanceM = 2030, durationSec = 760, officialResult = false),
+            HistoryEntry(id = "1369631995", startTimeMs = PAST_MS, distanceM = 2030, durationSec = 760, officialResult = false),
         )
         val vm = HomeViewModel(FakeHomeData(policy(), rows), TOKEN, CURRENT_VERSION, DIRECT, FakeSecureStore())
 
         vm.refresh()
 
         val state = vm.state
-        // Cumulative: sum 3530 m, scope-labeled to the fetched page — never a semester total.
-        assertTrue(state.cumulativeLine.contains("近 2 条累计"), "scope missing: ${state.cumulativeLine}")
-        assertTrue(state.cumulativeLine.contains("3.53 km"), "sum missing: ${state.cumulativeLine}")
-        // History list: one objective row per record, date/distance/duration only.
-        assertEquals(2, state.historyRows.size, "every fetched row must render")
-        assertTrue(state.latestLine.contains("id=9001"), "latest must name the newest record: ${state.latestLine}")
-        // Verdict removal: our valid-derived 达标/未达标 must never surface as fact.
+        // Counted: only the two 达标 rows sum (4.04 km), scope-labeled to the fetched
+        // page — never a semester total, never the naive 8.09 km.
+        assertTrue(state.cumulativeLine.contains("计入成绩"), "counted semantics missing: ${state.cumulativeLine}")
+        assertTrue(state.cumulativeLine.contains("近 4 条"), "scope missing: ${state.cumulativeLine}")
+        assertTrue(state.cumulativeLine.contains("4.04 km"), "counted sum missing: ${state.cumulativeLine}")
+        assertFalse(state.cumulativeLine.contains("8.09"), "不达标 rows must not contribute: ${state.cumulativeLine}")
+        // History list: one row per record with the server-sourced badge.
+        assertEquals(4, state.historyRows.size, "every fetched row must render")
+        assertTrue(state.historyRows[0].endsWith(" · 达标"), "达标 badge missing: ${state.historyRows[0]}")
+        assertTrue(state.historyRows[2].endsWith(" · 未达标"), "未达标 badge missing: ${state.historyRows[2]}")
+        assertTrue(state.latestLine.contains("id=1373345979"), "latest must name the newest record: ${state.latestLine}")
+        assertTrue(state.latestLine.endsWith(" · 达标"), "latest badge missing: ${state.latestLine}")
+        // Our divergent `valid` flag must never render — only the server verdict does.
         val allText = (state.historyRows + state.latestLine + state.cumulativeLine).joinToString("\n")
-        assertFalse(allText.contains("达标"), "our unreliable verdict must not render: $allText")
+        assertFalse(allText.contains("valid"), "our divergent flag must not render: $allText")
     }
 
     @Test

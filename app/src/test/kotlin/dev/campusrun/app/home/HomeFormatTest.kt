@@ -12,12 +12,14 @@ import org.junit.jupiter.api.Test
  * Pure Home formatting tests (brief Step 1) — the three facts the Home must show:
  *
  * - 学校要求的里程 (prominent copy of the rule's distance bounds, 未公布 when absent),
- * - 当前已完成的里程 (client-side sum of the fetched page, **labeled with its scope** —
- *   the records response carries no server-side semester summary, findings §3.1 D:
- *   `data` is a bare row array, so the sum is honestly `近N条累计`, never a semester total),
- * - 历史跑步记录 rows (date / distance / duration only — **objective data, no verdict**;
- *   the 19-key row has no field that tracks the official 达标 scoring, so our derived
- *   `valid` must never surface as fact).
+ * - 当前已完成的里程 — **counted only**: sums the fetched page's official 达标 rows
+ *   (`officialResult == true`, the server-scored 计入成绩 rule), scope-labeled
+ *   (`近N条`) because the records response carries no server-side semester summary
+ *   (findings §3.1 D: `data` is a bare row array, never a semester total), with an
+ *   honest labeled fallback when some rows carry no verdict field,
+ * - 历史跑步记录 rows (date / distance / duration + the **server-sourced**
+ *   达标/未达标 badge; rows without a verdict field carry no badge — never our
+ *   divergent `valid`, which is display-suppressed).
  */
 class HomeFormatTest {
 
@@ -34,47 +36,108 @@ class HomeFormatTest {
     }
 
     @Test
-    fun `cumulative - sum of the fetched page is labeled with its own scope`() {
+    fun `cumulative - counted progress sums only the official 达标 rows, scope-labeled`() {
+        // The account's five real rows (2026-11-24 dump): two 官方 达标 (2009 + 2030),
+        // three 官方 不达标 (2030 each) — the naive total is 10.13 km, counted is 4.04 km.
         val rows = listOf(
-            HistoryEntry(id = "1", startTimeMs = PAST_MS, distanceM = 2030, durationSec = 760),
-            HistoryEntry(id = "2", startTimeMs = PAST_MS, distanceM = 1500, durationSec = 600),
-            HistoryEntry(id = "3", startTimeMs = PAST_MS, distanceM = 1000, durationSec = 480),
+            HistoryEntry("1373345979", PAST_MS, 2030, 760, officialResult = true),
+            HistoryEntry("1371833451", PAST_MS, 2009, 700, officialResult = true),
+            HistoryEntry("1370876678", PAST_MS, 2030, 760, officialResult = false),
+            HistoryEntry("1369631995", PAST_MS, 2030, 760, officialResult = false),
+            HistoryEntry("1367719089", PAST_MS, 2030, 760, officialResult = false),
         )
 
         val line = cumulativeText(rows)
 
-        assertTrue(line.contains("近 3 条累计"), "scope must name the fetched row count: $line")
-        assertTrue(line.contains("4.53 km"), "sum of 4530 m must render as km: $line")
+        assertTrue(line.contains("计入成绩"), "counted-only semantics must be labeled: $line")
+        assertTrue(line.contains("近 5 条"), "scope must name the fetched row count: $line")
+        assertTrue(line.contains("4.04 km"), "only the two 达标 rows may sum: $line")
+        assertFalse(line.contains("10.13"), "不达标 rows must not contribute: $line")
         // The label must NOT masquerade as a semester/server total.
         assertFalse(line.contains("学期"), "a client-side page sum must not claim to be a semester total: $line")
     }
 
     @Test
+    fun `cumulative - rows without a verdict field fall back to a labeled known-count line`() {
+        val mixed = listOf(
+            HistoryEntry("1", PAST_MS, 2030, 760, officialResult = true),
+            HistoryEntry("2", PAST_MS, 1500, 600, officialResult = false),
+            HistoryEntry("3", PAST_MS, 1000, 480, officialResult = null), // older row: no status
+        )
+
+        val line = cumulativeText(mixed)
+
+        assertTrue(line.contains("计入成绩"), "counted semantics must survive the fallback: $line")
+        assertTrue(line.contains("已知 1 条计入"), "known-count must be stated: $line")
+        assertTrue(line.contains("1 条计分状态未知"), "unknown rows must be disclosed, not hidden: $line")
+        assertTrue(line.contains("2.03 km"), "only the one 达标 row counts: $line")
+        assertFalse(line.contains("学期"), "never a semester claim: $line")
+    }
+
+    @Test
+    fun `cumulative - all rows unknown reads as unknown, never as a zero total`() {
+        val allUnknown = listOf(
+            HistoryEntry("1", PAST_MS, 2030, 760),
+            HistoryEntry("2", PAST_MS, 1500, 600),
+        )
+
+        val line = cumulativeText(allUnknown)
+
+        assertTrue(line.contains("计入成绩"), "the metric must still be named: $line")
+        assertTrue(line.contains("未知"), "an all-unknown page must not print a counted total: $line")
+        assertFalse(line.contains("0 m"), "unknown must not render as a zero sum: $line")
+    }
+
+    @Test
     fun `cumulative - small sums stay in meters and an empty page reads as the empty state`() {
-        val small = cumulativeText(listOf(HistoryEntry("1", PAST_MS, 800, 300)))
+        val small = cumulativeText(listOf(HistoryEntry("1", PAST_MS, 800, 300, officialResult = true)))
         assertTrue(small.contains("800 m"), "sub-km sums must stay in meters: $small")
 
         assertEquals("暂无跑步记录", cumulativeText(emptyList()))
     }
 
     @Test
-    fun `row - maps date distance and duration from the objective fields only`() {
-        val row = HistoryEntry(id = "9001", startTimeMs = KNOWN_MS, distanceM = 2084, durationSec = 760)
+    fun `row - maps date distance duration and the server-sourced verdict badge`() {
+        val passed = historyRowText(
+            HistoryEntry(
+                id = "9001",
+                startTimeMs = KNOWN_MS,
+                distanceM = 2084,
+                durationSec = 760,
+                officialResult = true,
+            ),
+        )
+        assertEquals("11-21 15:30 · 2084 m · 12:40 · 达标", passed, "badge must follow the objective fields")
 
-        val text = historyRowText(row)
+        val failed = historyRowText(
+            HistoryEntry(
+                id = "9000",
+                startTimeMs = KNOWN_MS,
+                distanceM = 2030,
+                durationSec = 760,
+                officialResult = false,
+            ),
+        )
+        assertTrue(failed.endsWith(" · 未达标"), "official 不达标 must render: $failed")
+    }
 
-        assertEquals("11-21 15:30 · 2084 m · 12:40", text, "row must be date · distance · duration")
-        assertFalse(text.contains("达标"), "rows must never carry our verdict: $text")
-        assertFalse(text.contains("未达标"), "rows must never carry our verdict: $text")
+    @Test
+    fun `row - a row without a verdict field carries no badge instead of a guess`() {
+        val unknown = historyRowText(
+            HistoryEntry(id = "9002", startTimeMs = KNOWN_MS, distanceM = 2084, durationSec = 760),
+        )
+
+        assertEquals("11-21 15:30 · 2084 m · 12:40", unknown, "no verdict field -> no badge, never a guess")
+        assertFalse(unknown.contains("达标"), "an unknown verdict must not be stated: $unknown")
     }
 
     @Test
     fun `row - unknown date or duration degrade to honest placeholders not zeros`() {
-        val noDate = historyRowText(HistoryEntry("1", null, 100, 60))
+        val noDate = historyRowText(HistoryEntry("1", null, 100, 60, officialResult = true))
         assertTrue(noDate.contains("日期未知"), "missing startTime must not print epoch 0: $noDate")
 
-        val noDuration = historyRowText(HistoryEntry("2", PAST_MS, 100, null))
-        assertTrue(noDuration.contains("时长未知"), "missing totalTime must not print 0: $noDuration")
+        val noDuration = historyRowText(HistoryEntry("2", PAST_MS, 100, null, officialResult = false))
+        assertTrue(noDuration.contains("时长未知"), "missing totalTime must not print 0 s: $noDuration")
     }
 
     @Test
@@ -85,14 +148,17 @@ class HomeFormatTest {
     }
 
     @Test
-    fun `latest - objective summary carries id date distance duration, never a verdict`() {
-        val line = latestText(HistoryEntry("9001", KNOWN_MS, 2084, 760))
+    fun `latest - objective summary plus the server-sourced badge, never our divergent flag`() {
+        val line = latestText(HistoryEntry("9001", KNOWN_MS, 2084, 760, officialResult = true))
 
         assertTrue(line.contains("id=9001"), "latest must name the record id: $line")
         assertTrue(line.contains("11-21 15:30"), "latest must carry the date: $line")
         assertTrue(line.contains("2084 m"), "latest must carry the distance: $line")
         assertTrue(line.contains("12:40"), "latest must carry the duration: $line")
-        assertFalse(line.contains("达标"), "our valid-derived verdict must not surface: $line")
+        assertTrue(line.endsWith(" · 达标"), "the official badge must surface: $line")
+
+        val unknown = latestText(HistoryEntry("9001", KNOWN_MS, 2084, 760))
+        assertFalse(unknown.contains("达标"), "an unknown verdict must not be stated: $unknown")
 
         assertEquals("", latestText(null), "no record -> no latest line (the cumulative line owns the empty state)")
     }

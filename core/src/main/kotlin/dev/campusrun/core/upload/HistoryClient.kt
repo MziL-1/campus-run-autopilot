@@ -27,26 +27,41 @@ import java.time.ZoneId
  *
  * @param valid server row field (`isValid`/`complete`/`status`-derived) with divergent
  *   semantics vs official scoring — do not display as a verdict; official scoring is
- *   verified externally (grayscale daily official-app check), never from this flag.
- *   Diverges in both directions: 11-17 ours `true`/官方 不达标, 11-21 & 11-23 ours
- *   `false`/官方 达标.
+ *   [officialResult]. Diverges in both directions: 11-17 ours `true`/官方 不达标,
+ *   11-21 & 11-23 ours `false`/官方 达标.
+ *
+ * @param officialResult the OFFICIAL 达标/未达标 verdict as the server scores it:
+ *   `true` = 达标 (计入成绩), `false` = 未达标, `null` = the row carries no verdict
+ *   signal (older/legacy shapes — never guessed). Derived from the 7.4.x row `status`
+ *   field (`0` → 达标, `1` → 不达标, other values → `null`), with `complete=false`
+ *   always `false` (an incomplete record is never counted). Correlation: the five
+ *   records with official-app verdicts (grayscale log) separate 5/5 on `status`
+ *   alone — 1367719089/1369631995/1370876678 `status=1` 官方 不达标,
+ *   1371833451/1373345979 `status=0` 官方 达标; record-detail `statusInfo`
+ *   corroborates ("检测到跑步数据异常，本次成绩无效" vs "太棒了，恭喜您完成了跑步").
+ *   Note the polarity is INVERTED vs upstream 7.3.92 `history_record_status`
+ *   (`status==1 && complete` → 达标) — that flip is exactly why [valid] diverges.
  */
 data class RunRecord(
     val id: String,
     val distanceM: Int,
     val valid: Boolean,
     val startTimeMs: Long? = null,
+    val officialResult: Boolean? = null,
 )
 
 /**
- * One **objective** history row for the Home list (brief: 历史跑步记录): id, date,
- * distance and duration only.
+ * One history row for the Home list (brief: 历史跑步记录): id, date, distance,
+ * duration and the official scoring verdict.
  *
- * Deliberately carries **no verdict**: the 7.4.x 19-key row (findings §3.1 D) has no
- * field that tracks the official 达标 scoring — our `status`/`complete`-derived
- * `valid` diverges from the official verdict in *both* directions (11-17: ours
- * `true`, official 不达标; 11-21: ours `false`, official 达标) — so a verdict here
- * would be presented as fact while being unreliable. See [HistoryClient.list].
+ * @param officialResult the server's OFFICIAL 达标/未达标 verdict — `true` = 达标
+ *   (计入成绩), `false` = 未达标, `null` = no verdict signal on the row (never
+ *   guessed). This is an objective server field, not our derivation: the five
+ *   records whose official verdicts are known from the grayscale daily official
+ *   check separate 5/5 on the row's `status` (0 → 达标, 1 → 不达标; record-detail
+ *   `statusInfo` corroborates), while our `valid` derivation diverges in both
+ *   directions (11-17 ours `true`/官方 不达标; 11-21 & 11-23 ours `false`/官方
+ *   达标) and therefore stays display-suppressed. See [HistoryClient.list].
  *
  * @param durationSec the row's `totalTime` (seconds), `null` when absent/unusable.
  */
@@ -55,6 +70,7 @@ data class HistoryEntry(
     val startTimeMs: Long?,
     val distanceM: Int,
     val durationSec: Int?,
+    val officialResult: Boolean? = null,
 )
 
 /**
@@ -75,6 +91,11 @@ data class HistoryEntry(
  * is 达标; a bare `status==1` alone does **not** establish validity (upstream
  * `models.py` comment) and maps to `false`. `distanceM` uses `totalDis` with the
  * upstream `totalDis or distance` fallback, rounded Python-style ([pyRound]).
+ *
+ * `officialResult` is the server's OFFICIAL verdict (7.4.x row `status`: 0 → 达标,
+ * 1 → 不达标) — correlated 5/5 against known official-app verdicts, see
+ * [rowOfficialResult]. It is independent of `valid`, whose upstream polarity is
+ * inverted on 7.4.x rows and therefore display-suppressed.
  */
 class HistoryClient(val api: ApiClient) {
 
@@ -85,18 +106,20 @@ class HistoryClient(val api: ApiClient) {
             distanceM = pyRound(rowDistanceM(row)).toInt(),
             valid = rowValid(row),
             startTimeMs = rowStartTimeMs(row),
+            officialResult = rowOfficialResult(row),
         )
     }
 
     /**
-     * The full first page (up to 20 rows) as **objective** [HistoryEntry] rows for the
-     * Home history list (brief: 历史跑步记录 + 当前已完成的里程).
+     * The full first page (up to 20 rows) as [HistoryEntry] rows for the Home history
+     * list (brief: 历史跑步记录 + 当前已完成的里程).
      *
      * The records response carries **no server-side semester/summary field**: 7.4.x
      * `data` is a bare array of the 19-key rows (findings §3.1 D) and the legacy
      * `{recordList}` envelope's siblings are not a summary either — so the caller must
-     * sum the fetched rows itself and label the scope honestly (`近N条累计`), never as a
-     * semester total. No verdict is derived here (see [HistoryEntry]).
+     * sum the fetched rows itself and label the scope honestly, never as a semester
+     * total. The **counted** progress line sums only [HistoryEntry.officialResult]
+     * `true` rows (the official 计入成绩 rule), see `cumulativeText`.
      *
      * Same envelope contract as [latest]: business error or empty page -> empty list.
      */
@@ -106,6 +129,7 @@ class HistoryClient(val api: ApiClient) {
             startTimeMs = rowStartTimeMs(row),
             distanceM = pyRound(rowDistanceM(row)).toInt(),
             durationSec = rowDurationSec(row),
+            officialResult = rowOfficialResult(row),
         )
     }
 
@@ -224,6 +248,35 @@ private fun rowValid(row: JsonObject): Boolean {
     if (complete == false || valid == false) return false
     val status = row.longField("status")
     return valid == true || (status == 1L && complete == true)
+}
+
+/**
+ * The OFFICIAL 达标/未达标 verdict as scored by the server (7.4.x row `status`):
+ * `0` → `true` (达标, 计入成绩), `1` → `false` (未达标), any other/absent status →
+ * `null` (no verdict signal — never guessed); `complete=false` is always `false`
+ * (an incomplete record is never counted).
+ *
+ * Correlation evidence (2026-11-24 read-only dump of the account's five records with
+ * known official-app verdicts, grayscale log): `status` separates 5/5 with no overlap
+ * — 1367719089 / 1369631995 / 1370876678 `status=1` → 官方 不达标, 1371833451 /
+ * 1373345979 `status=0` → 官方 达标 — while every other list-row key is constant
+ * across verdicts (`complete=true`, `validDis==totalDis`, `validTime==totalTime`,
+ * `stepFreqStatus=0`, `appealStatus=0`, `type/prize/recordUrl/prizeName=null`).
+ * The record-detail endpoint (`get_one_record`) corroborates the polarity:
+ * `status=1` rows carry `statusInfo="检测到跑步数据异常，本次成绩无效"` + failing speed
+ * rule, `status=0` rows carry `statusInfo="太棒了，恭喜您完成了跑步"` + all rules passing.
+ *
+ * The polarity is INVERTED vs upstream 7.3.92 `history_record_status`
+ * (`status==1 && complete==true` → 达标) — that flip is exactly the documented
+ * three-way divergence of our [rowValid]-derived `valid` flag.
+ */
+private fun rowOfficialResult(row: JsonObject): Boolean? {
+    if (row.boolField("complete") == false) return false
+    return when (row.longField("status")) {
+        0L -> true
+        1L -> false
+        else -> null
+    }
 }
 
 /**

@@ -154,8 +154,8 @@ fun HomeScreen(
                 Text("当前进度", style = MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(8.dp))
                 when {
-                    // 当前已完成的里程 (brief item 3): scope-labeled client-side sum of
-                    // the fetched page — the API exposes no semester summary (§3.1 D).
+                    // 当前已完成的里程 (brief item 3): counted-only (计入成绩) client-side
+                    // sum of the fetched page — the API exposes no semester summary (§3.1 D).
                     state.cumulativeLine.isNotEmpty() -> {
                         Text(
                             state.cumulativeLine,
@@ -174,9 +174,10 @@ fun HomeScreen(
             }
         }
 
-        // 历史跑步记录 (brief item 4): the fetched page (up to 20 rows), objective fields
-        // only — date · distance · duration, no 达标/未达标 verdict, because our
-        // status-derived `valid` diverges from the official scoring in both directions.
+        // 历史跑步记录 (brief item 4): the fetched page (up to 20 rows) — date ·
+        // distance · duration plus the SERVER-sourced 达标/未达标 badge (the row's
+        // official `status`, correlated 5/5 vs the official app). Rows without the
+        // field carry no badge; our divergent `valid` never renders.
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp)) {
                 Text("历史跑步记录", style = MaterialTheme.typography.titleMedium)

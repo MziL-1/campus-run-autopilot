@@ -180,7 +180,7 @@ class RunUploaderTest {
 
         val record = HistoryClient(api()).latest(token)
 
-        assertEquals(RunRecord("987", 2150, true), record)
+        assertEquals(RunRecord("987", 2150, true, null, false), record)
         val request = server.takeRequest()
         assertEquals("/api/v70230/runnings/records", request.path)
         assertEquals("POST", request.method)
@@ -216,9 +216,9 @@ class RunUploaderTest {
         )
         val client = HistoryClient(api())
 
-        assertEquals(RunRecord("1", 100, false), client.latest(TOKEN))
-        assertEquals(RunRecord("2", 100, true), client.latest(TOKEN))
-        assertEquals(RunRecord("3", 100, false), client.latest(TOKEN))
+        assertEquals(RunRecord("1", 100, false, null, false), client.latest(TOKEN))
+        assertEquals(RunRecord("2", 100, true, null, false), client.latest(TOKEN))
+        assertEquals(RunRecord("3", 100, false, null, false), client.latest(TOKEN))
     }
 
     @Test
@@ -238,8 +238,9 @@ class RunUploaderTest {
         )
         val client = HistoryClient(api())
 
-        assertEquals(RunRecord("7", 1234, false), client.latest(TOKEN))
-        assertEquals(RunRecord("8", 100, true), client.latest(TOKEN))
+        assertEquals(RunRecord("7", 1234, false, null, false), client.latest(TOKEN))
+        // row 8 has isValid but no `status` -> official verdict unknown (null), never guessed.
+        assertEquals(RunRecord("8", 100, true, null, null), client.latest(TOKEN))
     }
 
     @Test
@@ -288,7 +289,7 @@ class RunUploaderTest {
     }
 
     @Test
-    fun `history list returns every page row as objective entries without a verdict`() {
+    fun `history list returns every page row with objective fields and the official verdict`() {
         // The 7.4.x bare-array envelope (findings §3.1 D): 19-key rows, no summary field.
         server.enqueue(
             MockResponse().setBody(
@@ -310,11 +311,14 @@ class RunUploaderTest {
                 startTimeMs = 1795246200000L,
                 distanceM = 2084, // pyRound(2084.4)
                 durationSec = 760,
+                officialResult = false, // status=1 -> 官方 不达标
             ),
             entries[0],
         )
         assertEquals(1500, entries[1].distanceM)
+        assertEquals(false, entries[1].officialResult, "complete=false is never counted")
         assertNull(entries[2].durationSec, "a row without totalTime must stay unknown, not 0")
+        assertNull(entries[2].officialResult, "a row without status carries no verdict, never a guess")
 
         assertEquals(emptyList<HistoryEntry>(), HistoryClient(api()).list(TOKEN), "business error -> no rows")
     }
