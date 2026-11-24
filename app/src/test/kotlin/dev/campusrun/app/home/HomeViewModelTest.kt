@@ -107,6 +107,8 @@ class HomeViewModelTest {
                 throw java.io.IOException("profile transport failed")
 
             override fun fetchHistory(token: Token): List<HistoryEntry> = emptyList()
+
+            override fun fetchCountedSemester(token: Token): Int? = null
         }
         val vm = HomeViewModel(data, TOKEN, CURRENT_VERSION, DIRECT, FakeSecureStore())
 
@@ -116,6 +118,54 @@ class HomeViewModelTest {
         assertNull(vm.state.error, "a cosmetic leg failure must not raise the error banner")
         assertTrue(vm.state.rules.isNotEmpty(), "rules must still render")
         assertEquals("", vm.state.schoolName, "a failed profile leaves the school name blank")
+    }
+
+    @Test
+    fun `server semester total - preferred over the page sum and labeled as server-sourced`() {
+        val rows = listOf(
+            HistoryEntry(id = "1373345979", startTimeMs = PAST_MS, distanceM = 2030, durationSec = 760, officialResult = true),
+            HistoryEntry(id = "1370876678", startTimeMs = PAST_MS, distanceM = 2030, durationSec = 760, officialResult = false),
+        )
+        val vm = HomeViewModel(
+            FakeHomeData(policy(), rows, serverCountedM = 4039),
+            TOKEN,
+            CURRENT_VERSION,
+            DIRECT,
+            FakeSecureStore(),
+        )
+
+        vm.refresh()
+
+        val line = vm.state.cumulativeLine
+        assertTrue(line.contains("4.04 km"), "the server total must render: $line")
+        assertTrue(line.contains("服务端"), "the server source must be disclosed: $line")
+        assertFalse(line.contains("近 2 条"), "the server total must not carry the page scope: $line")
+    }
+
+    @Test
+    fun `semester leg failure - refresh still lands with the counted page-sum fallback`() {
+        // Best-effort like the profile leg: a thrown semester error degrades to the
+        // counted client-side sum, never fails the refresh.
+        val rows = listOf(
+            HistoryEntry(id = "1373345979", startTimeMs = PAST_MS, distanceM = 2030, durationSec = 760, officialResult = true),
+            HistoryEntry(id = "1370876678", startTimeMs = PAST_MS, distanceM = 2030, durationSec = 760, officialResult = false),
+        )
+        val vm = HomeViewModel(
+            FakeHomeData(policy(), rows, semesterFailure = true),
+            TOKEN,
+            CURRENT_VERSION,
+            DIRECT,
+            FakeSecureStore(),
+        )
+
+        vm.refresh()
+
+        assertFalse(vm.state.loading, "a semester failure must not strand the refresh")
+        assertNull(vm.state.error, "a best-effort leg failure must not raise the error banner")
+        val line = vm.state.cumulativeLine
+        assertTrue(line.contains("2.03 km"), "counted page-sum fallback must render: $line")
+        assertTrue(line.contains("近 2 条"), "the fallback keeps its page scope: $line")
+        assertTrue(vm.state.rules.isNotEmpty(), "rules must still render")
     }
 
     @Test
@@ -273,6 +323,7 @@ class HomeViewModelTest {
         }
         val data = object : HomeData {
             var historyCalls = 0
+            var semesterCalls = 0
 
             override fun fetchPolicy(token: Token): RunPolicy {
                 api.setCredentials(token.uid, token.value) // mimics PolicyClient (entry)
@@ -291,6 +342,12 @@ class HomeViewModelTest {
                 historyCalls += 1
                 return emptyList()
             }
+
+            override fun fetchCountedSemester(token: Token): Int? {
+                api.setCredentials(token.uid, token.value) // mimics SemesterSummaryClient (entry)
+                semesterCalls += 1
+                return null
+            }
         }
         val vm = HomeViewModel(data, TOKEN, CURRENT_VERSION, executor, store)
 
@@ -307,6 +364,7 @@ class HomeViewModelTest {
         assertEquals(1, store.clears, "logout must clear the session exactly once")
         assertNull(api.uid, "no in-flight leg may re-install the cleared credentials")
         assertEquals(0, data.historyCalls, "the later token-taking legs must not start after logout")
+        assertEquals(0, data.semesterCalls, "the semester leg must not start after logout either")
     }
 
     /** Spec §5.5-6 display fixture — the live school's advertised rule (T2/T9 fixture). */
@@ -328,12 +386,17 @@ class HomeViewModelTest {
         private val policy: RunPolicy,
         private val records: List<HistoryEntry> = emptyList(),
         private val profile: UserProfile? = null,
+        private val serverCountedM: Int? = null,
+        private val semesterFailure: Boolean = false,
     ) : HomeData {
         override fun fetchPolicy(token: Token): RunPolicy = policy
 
         override fun fetchProfile(token: Token): UserProfile? = profile
 
         override fun fetchHistory(token: Token): List<HistoryEntry> = records
+
+        override fun fetchCountedSemester(token: Token): Int? =
+            if (semesterFailure) throw java.io.IOException("semester transport failed") else serverCountedM
     }
 
     /**

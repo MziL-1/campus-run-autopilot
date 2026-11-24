@@ -120,6 +120,8 @@ class UpdatePromptStateTest {
         override fun fetchProfile(token: Token): UserProfile? = null
 
         override fun fetchHistory(token: Token): List<HistoryEntry> = emptyList()
+
+        override fun fetchCountedSemester(token: Token): Int? = null
     }
 
     private class FakeStore : TokenStore {

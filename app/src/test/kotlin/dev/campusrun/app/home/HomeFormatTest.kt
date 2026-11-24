@@ -12,11 +12,13 @@ import org.junit.jupiter.api.Test
  * Pure Home formatting tests (brief Step 1) — the three facts the Home must show:
  *
  * - 学校要求的里程 (prominent copy of the rule's distance bounds, 未公布 when absent),
- * - 当前已完成的里程 — **counted only**: sums the fetched page's official 达标 rows
- *   (`officialResult == true`, the server-scored 计入成绩 rule), scope-labeled
- *   (`近N条`) because the records response carries no server-side semester summary
- *   (findings §3.1 D: `data` is a bare row array, never a semester total), with an
- *   honest labeled fallback when some rows carry no verdict field,
+ * - 当前已完成的里程 — **counted only (计入成绩)**: prefers the server-side semester
+ *   total (`SemesterSummaryClient.semesterDis`, the official 计入成绩 number) when the
+ *   leg yields one, labeled as server/学期-sourced; otherwise sums the fetched page's
+ *   official 达标 rows (`officialResult == true`), scope-labeled `近N条` because the
+ *   records response carries no server-side semester summary (findings §3.1 D: `data`
+ *   is a bare row array, never a semester total), with an honest labeled fallback when
+ *   some rows carry no verdict field,
  * - 历史跑步记录 rows (date / distance / duration + the **server-sourced**
  *   达标/未达标 badge; rows without a verdict field carry no badge — never our
  *   divergent `valid`, which is display-suppressed).
@@ -55,6 +57,25 @@ class HomeFormatTest {
         assertFalse(line.contains("10.13"), "不达标 rows must not contribute: $line")
         // The label must NOT masquerade as a semester/server total.
         assertFalse(line.contains("学期"), "a client-side page sum must not claim to be a semester total: $line")
+    }
+
+    @Test
+    fun `cumulative - a server-side counted total is preferred and labeled as such`() {
+        val rows = listOf(
+            HistoryEntry("1373345979", PAST_MS, 2030, 760, officialResult = true),
+            HistoryEntry("1371833451", PAST_MS, 2009, 700, officialResult = true),
+            HistoryEntry("1370876678", PAST_MS, 2030, 760, officialResult = false),
+        )
+
+        val line = cumulativeText(rows, serverCountedM = 4039)
+
+        assertTrue(line.contains("计入成绩"), "counted semantics must be labeled: $line")
+        assertTrue(line.contains("4.04 km"), "the server total must render: $line")
+        assertTrue(line.contains("服务端"), "the server source must be disclosed: $line")
+        assertTrue(line.contains("学期"), "a server semester total may say so: $line")
+        // The server number wins even over a divergent client sum (page rows here sum
+        // to a different naive total) — no scope suffix that would contradict it.
+        assertFalse(line.contains("近 3 条"), "the server total is not a page sum: $line")
     }
 
     @Test

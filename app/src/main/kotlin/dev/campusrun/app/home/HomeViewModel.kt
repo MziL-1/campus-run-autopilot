@@ -16,6 +16,7 @@ import dev.campusrun.core.session.Token
 import dev.campusrun.core.session.TokenStore
 import dev.campusrun.core.upload.HistoryClient
 import dev.campusrun.core.upload.HistoryEntry
+import dev.campusrun.core.upload.SemesterSummaryClient
 import java.time.Instant
 import java.time.format.DateTimeFormatter
 import java.util.Locale
@@ -73,6 +74,12 @@ interface HomeData {
 
     /** Page 1 of history rows (objective fields + official verdict); empty list when there is no history. */
     fun fetchHistory(token: Token): List<HistoryEntry>
+
+    /**
+     * Server-side counted semester total in meters (官方 计入成绩); `null` when the
+     * server offers none — best-effort, the caller falls back to the page sum.
+     */
+    fun fetchCountedSemester(token: Token): Int?
 }
 
 /**
@@ -156,13 +163,17 @@ class HomeViewModel(
                 if (loggedOut) return@execute
                 val history = data.fetchHistory(token)
                 if (loggedOut) return@execute
+                // Best-effort like the profile leg: a missing/failing server total
+                // degrades to the counted page sum, never fails the refresh.
+                val serverCountedM = runCatching { data.fetchCountedSemester(token) }.getOrNull()
+                if (loggedOut) return@execute
                 state = HomeUiState(
                     loading = false,
                     rules = ruleLines(policy),
                     requirementLine = requirementText(policy),
                     schoolName = profile?.schoolName.orEmpty(),
                     nickname = profile?.displayName.orEmpty(),
-                    cumulativeLine = cumulativeText(history),
+                    cumulativeLine = cumulativeText(history, serverCountedM),
                     latestLine = latestText(history.firstOrNull()),
                     historyRows = history.map(::historyRowText),
                 )
@@ -260,20 +271,34 @@ internal fun requirementText(policy: RunPolicy): String {
 }
 
 /**
- * 当前已完成的里程 (brief item 3) — **counted only (计入成绩)**: the sum of the
- * fetched page's **official 达标** rows ([HistoryEntry.officialResult] `true`, the
- * server-scored verdict correlated 5/5 against the official app — see
- * `HistoryClient`/`rowOfficialResult`), labeled with its exact scope (`近N条`) because
- * the records API exposes no semester summary (findings §3.1 D — `data` is a bare row
- * array), so presenting this as a semester total would fabricate completeness we do
- * not have. An empty page is the empty-state copy, not a zero total.
+ * 当前已完成的里程 (brief item 3) — **counted only (计入成绩)**:
  *
- * Honest fallbacks when the verdict field is absent (older/legacy rows):
+ * - **preferred**: [serverCountedM] — the server-side semester total
+ *   (`SemesterSummaryClient` → `semesterDis`, the official 计入成绩 number; live probe
+ *   4039 = exactly the two 达标 rows while the naive page sums to 10129). Labeled with
+ *   its source (`服务端学期口径`) because it IS a semester total — the only case where
+ *   claiming 学期 is honest.
+ * - **fallback** (server leg absent/failed): the fetched page's official 达标 rows
+ *   ([HistoryEntry.officialResult] `true`, correlated 5/5 against the official app —
+ *   see `rowOfficialResult`), scope-labeled `近N条` because the records API exposes no
+ *   semester summary (findings §3.1 D — `data` is a bare row array), so presenting
+ *   this as a semester total would fabricate completeness we do not have.
+ *
+ * An empty page is the empty-state copy, not a zero total.
+ *
+ * Honest fallbacks when the verdict field is absent (older/legacy rows, client-side
+ * path only):
  * - some rows unknown → the counted sum plus `已知 N 条计入，M 条计分状态未知` —
  *   unknown rows are disclosed, never silently counted or dropped;
  * - all rows unknown → `未知` instead of a fabricated `0` total.
  */
-internal fun cumulativeText(rows: List<HistoryEntry>): String {
+internal fun cumulativeText(rows: List<HistoryEntry>, serverCountedM: Int? = null): String {
+    // The server total outranks the page entirely: an empty/failed page must not
+    // mask a real server-side counted total (and vice versa — the server number is
+    // the official 计入成绩 fact, the page sum is only the labeled fallback).
+    serverCountedM?.let { meters ->
+        return "已完成（计入成绩，服务端学期口径）：${formatDistance(meters)}"
+    }
     if (rows.isEmpty()) return "暂无跑步记录"
     val counted = rows.filter { it.officialResult == true }
     val unknown = rows.count { it.officialResult == null }
@@ -337,11 +362,13 @@ private fun rowDate(startTimeMs: Long?): String {
 
 private val ROW_DATE_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("MM-dd HH:mm")
 
-/** Production [HomeData]: the three read-only core clients over the shared [ApiClient]. */
+/** Production [HomeData]: the read-only core clients over the shared [ApiClient]. */
 class CoreHomeData(private val api: ApiClient) : HomeData {
     override fun fetchPolicy(token: Token): RunPolicy = PolicyClient(api).fetch(token, mode = 1)
 
     override fun fetchProfile(token: Token): UserProfile? = ProfileClient(api).fetch(token)
 
     override fun fetchHistory(token: Token): List<HistoryEntry> = HistoryClient(api).list(token)
+
+    override fun fetchCountedSemester(token: Token): Int? = SemesterSummaryClient(api).countedMeters(token)
 }
