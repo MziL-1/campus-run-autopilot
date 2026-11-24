@@ -162,6 +162,35 @@ SHAPE history.calendar_list code=-10000 message="ERROR" data=NoneType
   说明**要么入参形态变了**（如改 `sid`/`startDate`/`endDate`），**要么该账号/学校未开启日历功能**；
 - 结论：**参数变（端点未变）**。Task 9 实现时先把 `-10000` 兜底为「无日历数据」，再按 7.4.x 客户端核对入参。
 
+### 3.7 多校区列表与切换（DEX 静态还原，未线上探测）
+
+首页「当前校园」要做校区下拉，需要**账号可用校区列表**。7.4.0 FridaDump DEX
+（`reference/upstream/原始资料/运动世界7.4.0-FridaDump.zip`）里 `net/CommonServer`
+的 Retrofit 注解直接给出三条端点（本节全部来自 DEX 注解与实体字段，**未做线上读**：
+今天账号还有控制器排定的灰度提交，单会话账号再登录会踢掉手机会话并触发 `10121` 冷却）：
+
+| 用途 | 方法 | 端点 | 返回（`BasicBean<T>` 信封） |
+| --- | --- | --- | --- |
+| **账号校区列表** | `GET` `getMyCampusList` `@Query("unid")` | `/api/v61101/campus/zonelist?unid=<账号 unid>` | `data: List<MyCampusBean>`，`MyCampusBean{unid:Int, name:String, allowChange:Boolean, isSelected:Boolean}` |
+| 切换开关 | `GET` `getIsSwitchSchool` | `/api/v70103/university/getUserInformation` | `data: ChangeCampusBean{openChangeCampus, modelStatus, url…}` |
+| **官方切换动作** | `POST` `getUpdateCampus` `@Body RequestBody` | `/api/v61101/user/updatezone` | `data: String` |
+
+补充证据（同为 DEX）：
+
+- `mvi/me/ChangeMyCampusActivity` 的成功回调 `ChangeMyCampusActivity$OooO0OO.onSuccess(String)`
+  在切换后**本地改写 `UserInfo.unid`/`campusName`** 并回推 Home 的 LiveData →
+  官方语义是「服务端换区 + 本地 unid 跟着换」，之后所有 `selectUnid` 类入参都用新 unid；
+- 校区列表为空时该页提示 `暂无任何校区`；
+- `CommonApiManager.getUpdateCampus(RequestBody)` 的**请求体字段名无法还原**：
+  构造代码位于 base dex 段（各版本 `dump_exact_0/base` 的头表都被截断，`code_off=0`），
+  因此 `updatezone` 的入参形态本轮**未知**，也未在线试写。
+
+**本轮实现取舍**：读端点 `campus/zonelist` 按上表移植为 `CampusClient`（只读，安全）；
+切换只改**读规则用的 `selectUnid`/`selectedUnid`**（Task 6 既有字段）并持久化本地选择，
+**不调用 `updatezone`**（入参未知 + 属写操作，灰度提交日不碰账号状态），
+About 区明示「不修改平台账号登记的校区」。校区列表的真实响应形状（信封/字段名）
+尚未线上核对，属**未验证项**（见 §6）。
+
 ---
 
 ## 4. 对后续任务的影响（Task 3–13）
@@ -243,3 +272,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\probe.ps1 -Stage histo
 4. **结算链路零覆盖**：`save/record`、`get_one_record`、OBS 预签名全部未探测，Task 8 风险最高。
 5. **单会话限制**：探测结束后账号仍被本次会话占用，1 小时内再次登录会得到 `10121`；补测前请等锁释放或在真机登录踢掉旧会话。
 6. **规则体只在时段内可验证**：`runModePolicy` 时段外为空（§3.5），任何涉及 `runRuleModel` 的验收都必须安排在 10:00–22:00。
+7. **校区列表未线上核对**（§3.7）：`/api/v61101/campus/zonelist` 的信封与字段名来自 DEX 实体还原，
+   本轮**没有线上读**（灰度提交日不登录、不碰单会话）；真实响应形状需在提交后补一次只读探测。
+8. **`selectUnid` 换区语义未验证**：本工具的校区下拉只改读规则用的 `selectUnid`/`selectedUnid`，
+   服务端是否据此下发另一校区的规则/点位，需要多校区账号在时段内做两次对照拉取才能确认；
+   官方的 `POST /api/v61101/user/updatezone` 因入参未知且属写操作，本轮**未实现也未调用**。

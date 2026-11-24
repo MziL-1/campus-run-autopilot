@@ -17,6 +17,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import dev.campusrun.app.data.AndroidParamsKeyStore
+import dev.campusrun.app.data.AndroidCampusSelectionStore
 import dev.campusrun.app.data.AndroidTokenStore
 import dev.campusrun.app.data.DeviceIdentitySnapshot
 import dev.campusrun.app.diag.DiagnosticsScreen
@@ -230,6 +231,9 @@ class MainActivity : ComponentActivity() {
                                 // Shared with the global layer (double-prompt guard): Home
                                 // only views the prompt; MainActivity renders it.
                                 updatePromptState = updatePromptState,
+                                // Persisted campus choice (校区下拉): survives refresh and
+                                // app restart; dropped again on logout with the session.
+                                campusSelection = AndroidCampusSelectionStore(this),
                             )
                         }
                         val runVm = remember(token) {

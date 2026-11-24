@@ -1,6 +1,8 @@
 package dev.campusrun.app.home
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -13,6 +15,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -83,7 +87,51 @@ fun HomeScreen(
         // 当前校园名 (brief item 1): from the read-only user/info leg — the user's OWN
         // school name (and optional nickname), on-device only. Blank until the profile
         // leg lands; blank-on-failure shows nothing rather than inventing a school.
-        if (state.schoolName.isNotEmpty()) {
+        //
+        // 校区下拉: only when the platform's own `zonelist` returns MORE than one campus
+        // (a single campus stays the plain line — no affordance that cannot go anywhere);
+        // picking an item persists the choice and re-reads the rule for that campus.
+        val campusOptions = state.campuses
+        if (campusSwitchable(campusOptions)) {
+            var menuOpen by remember(campusOptions, state.selectedCampusUnid) {
+                mutableStateOf(false)
+            }
+            val selectedName = campusOptions
+                .firstOrNull { it.unid == state.selectedCampusUnid }
+                ?.name
+                ?: state.schoolName.ifEmpty { campusOptions.first().name }
+            Box {
+                Text(
+                    buildString {
+                        append("当前校园：")
+                        append(selectedName)
+                        if (state.nickname.isNotEmpty()) append(" · ${state.nickname}")
+                        append(" ▾")
+                    },
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier
+                        .clickable { menuOpen = true }
+                        .padding(vertical = 4.dp),
+                )
+                DropdownMenu(
+                    expanded = menuOpen,
+                    onDismissRequest = { menuOpen = false },
+                ) {
+                    campusOptions.forEach { campus ->
+                        val isCurrent = campus.unid == state.selectedCampusUnid
+                        DropdownMenuItem(
+                            text = {
+                                Text(if (isCurrent) "${campus.name}（当前）" else campus.name)
+                            },
+                            onClick = {
+                                menuOpen = false
+                                vm.selectCampus(campus.unid)
+                            },
+                        )
+                    }
+                }
+            }
+        } else if (state.schoolName.isNotEmpty()) {
             Text(
                 buildString {
                     append("当前校园：")
@@ -234,6 +282,13 @@ fun HomeScreen(
                 Text(
                     "本工具免费分发：不收取任何费用、无售后、不建立用户数据；" +
                         "仅供学习与研究使用，使用风险自负。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "校区下拉仅切换本工具读取规则与点位时使用的校区标识（selectUnid），" +
+                        "不修改平台账号登记的校区；平台侧校区变更请以官方 App 为准。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

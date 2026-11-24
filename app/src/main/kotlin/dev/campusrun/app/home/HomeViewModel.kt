@@ -5,6 +5,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import dev.campusrun.app.update.UpdatePromptState
 import dev.campusrun.core.api.ApiClient
+import dev.campusrun.core.campus.CampusClient
+import dev.campusrun.core.campus.CampusOption
+import dev.campusrun.core.campus.CampusSelectionStore
+import dev.campusrun.core.campus.InMemoryCampusSelectionStore
 import dev.campusrun.core.config.RemoteVersionInfo
 import dev.campusrun.core.diag.RedactedLog
 import dev.campusrun.core.policy.PolicyClient
@@ -56,6 +60,14 @@ data class HomeUiState(
     val schoolName: String = "",
     /** Optional nickname (user's own, on-device); `""` when the server sends none. */
     val nickname: String = "",
+    /**
+     * The account's campuses from `GET /api/v61101/campus/zonelist` (`CampusClient`) —
+     * empty when the leg failed or the platform offers none, in which case the header
+     * stays the plain profile line (no fake affordance).
+     */
+    val campuses: List<CampusOption> = emptyList(),
+    /** The campus Home currently reads the rule for (persisted choice, else the platform's `isSelected`); `null` = session default. */
+    val selectedCampusUnid: Int? = null,
     /** 当前已完成的里程 — counted (计入成绩) client-side sum of the fetched page, scope-labeled. */
     val cumulativeLine: String = "",
     /** Newest record, objective fields + the server-sourced badge; `""` when there is no record. */
@@ -80,6 +92,13 @@ interface HomeData {
      * server offers none — best-effort, the caller falls back to the page sum.
      */
     fun fetchCountedSemester(token: Token): Int?
+
+    /**
+     * The account's campuses (read-only `zonelist` leg); `null` = no answer (business
+     * error / transport), an empty list = the platform reports none. Defaulted so the
+     * pre-campus call sites keep compiling against the unchanged contract.
+     */
+    fun fetchCampuses(token: Token): List<CampusOption>? = null
 }
 
 /**
@@ -121,6 +140,14 @@ class HomeViewModel(
      * [updatePrompt] here too, so nothing can render the dialog a second time.
      */
     private val updatePromptState: UpdatePromptState = UpdatePromptState(currentApkVersionCode),
+    /**
+     * Persisted campus choice (which campus's rule Home reads). Session-only by default
+     * (unit tests); MainActivity passes the [dev.campusrun.app.data.AndroidCampusSelectionStore]
+     * so a refresh or an app restart keeps the selection. Never a credential — it only
+     * decides the `selectUnid` the policy leg sends, so the session token (and therefore
+     * settlement's `selectedUnid`) is untouched.
+     */
+    private val campusSelection: CampusSelectionStore = InMemoryCampusSelectionStore(),
 ) {
 
     var state: HomeUiState by mutableStateOf(HomeUiState())
@@ -157,7 +184,30 @@ class HomeViewModel(
                 // token into the shared ApiClient at leg entry, so a leg started after
                 // the drop would resurrect the cleared credentials.
                 if (loggedOut) return@execute
-                val policy = data.fetchPolicy(token)
+                // Campus leg (best-effort like the profile leg): the persisted choice is
+                // local, the list is the platform's — either may be absent without
+                // failing the risk-control facts below.
+                val campuses = runCatching { data.fetchCampuses(token) }.getOrNull()
+                if (loggedOut) return@execute
+                val stored = campusSelection.load()?.toIntOrNull()
+                // Self-heal: a choice the platform no longer lists is dropped, but only
+                // when we actually got a list (`null` = no answer → keep the choice).
+                if (stored != null && campuses != null &&
+                    campuses.isNotEmpty() && campuses.none { it.unid == stored }
+                ) {
+                    campusSelection.clear()
+                }
+                val effective = effectiveCampusUnid(stored, campuses)
+                if (loggedOut) return@execute
+                // The campus choice reaches the wire ONLY as the policy leg's unid
+                // (upstream `selectUnid`/`selectedUnid`); the session token is not
+                // rewritten, so settlement keeps the login unid (no Settlement change).
+                val policyToken = if (effective == null || effective == token.unid.toIntOrNull()) {
+                    token
+                } else {
+                    token.copy(unid = effective.toString())
+                }
+                val policy = data.fetchPolicy(policyToken)
                 if (loggedOut) return@execute
                 val profile = runCatching { data.fetchProfile(token) }.getOrNull()
                 if (loggedOut) return@execute
@@ -173,6 +223,8 @@ class HomeViewModel(
                     requirementLine = requirementText(policy),
                     schoolName = profile?.schoolName.orEmpty(),
                     nickname = profile?.displayName.orEmpty(),
+                    campuses = campuses.orEmpty(),
+                    selectedCampusUnid = effective,
                     cumulativeLine = cumulativeText(history, serverCountedM),
                     latestLine = latestText(history.firstOrNull()),
                     historyRows = history.map(::historyRowText),
@@ -184,6 +236,22 @@ class HomeViewModel(
     }
 
     /**
+     * 校区切换 (campus switcher): the dropdown only ever offers the account's OWN
+     * campuses from the last refresh, so an out-of-list id is ignored (no blind write).
+     *
+     * The choice is persisted first (a refresh or an app restart keeps it) and then the
+     * whole Home reload runs — policy first, so the new campus's rule/points are what
+     * render. Only the policy leg's `selectUnid` changes; the session token, and with it
+     * settlement's `selectedUnid`, is untouched.
+     */
+    fun selectCampus(unid: Int) {
+        if (loggedOut) return
+        if (!campusSwitchable(state.campuses) || state.campuses.none { it.unid == unid }) return
+        campusSelection.save(unid.toString())
+        refresh()
+    }
+
+    /**
      * Logout (spec §5.5-3): drops the persisted session through core's [TokenStore] —
      * the session-keys-only contract — so the device-identity salt/snapshot, the install
      * keys and ParamsStore stay untouched and the device id never churns. Idempotent:
@@ -191,11 +259,15 @@ class HomeViewModel(
      *
      * The [loggedOut] signal is raised BEFORE the drop (fix: invalidate in-flight work
      * on logout): the refresh worker checks it before each token-taking leg, so no leg
-     * can start once the session is being cleared.
+     * can start once the session is being cleared. The persisted campus choice is
+     * dropped with the session (per-account, see [selectCampus]).
      */
     fun logout() {
         if (loggedOut) return
         loggedOut = true
+        // The campus choice is per-account: a later login on this device must not
+        // inherit it (same rule as the session keys).
+        campusSelection.clear()
         tokenStore.clear()
     }
 
@@ -371,4 +443,29 @@ class CoreHomeData(private val api: ApiClient) : HomeData {
     override fun fetchHistory(token: Token): List<HistoryEntry> = HistoryClient(api).list(token)
 
     override fun fetchCountedSemester(token: Token): Int? = SemesterSummaryClient(api).countedMeters(token)
+
+    override fun fetchCampuses(token: Token): List<CampusOption>? = CampusClient(api).fetch(token)
+}
+
+/**
+ * The dropdown is offered **only** for a real choice (brief: keep it honest — a single
+ * campus renders the plain profile line, never a menu that cannot go anywhere).
+ */
+internal fun campusSwitchable(campuses: List<CampusOption>): Boolean = campuses.size > 1
+
+/**
+ * Which campus's rule the policy leg should read:
+ *
+ * 1. the persisted choice while the platform still lists it (survives refresh/restart);
+ * 2. otherwise the platform's own `isSelected` campus;
+ * 3. `null` = no override — the policy keeps the session's `unid`.
+ *
+ * [campuses] is `null` when the list leg gave no answer: the persisted choice is then
+ * kept (a transient failure must not silently move the user back to another campus),
+ * while a real empty list yields `null` (the platform reports no campuses at all).
+ */
+internal fun effectiveCampusUnid(stored: Int?, campuses: List<CampusOption>?): Int? {
+    campuses ?: return stored
+    if (stored != null && campuses.any { it.unid == stored }) return stored
+    return campuses.firstOrNull { it.isSelected }?.unid
 }

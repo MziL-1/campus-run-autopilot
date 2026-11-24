@@ -28,10 +28,19 @@ import kotlin.math.roundToInt
  */
 class PolicyClient(val api: ApiClient) {
 
-    fun fetch(token: Token, mode: Int): RunPolicy {
+    /**
+     * @param selectUnid the campus/organisation id the rule is read **for** — upstream's
+     *   `selectUnid` (runModePolicy) and `selectedUnid` (five-point) fields. Defaults to
+     *   the session's [Token.unid]; Home passes the persisted campus choice here
+     *   (`CampusClient` → `HomeViewModel`) so a campus switch changes ONLY which rule is
+     *   read. The session token itself is never rewritten (settlement keeps the login
+     *   `unid` — spec: no Settlement changes).
+     */
+    fun fetch(token: Token, mode: Int, selectUnid: String = token.unid): RunPolicy {
         // The token is the request identity: apply it like SessionManager would, so callers
         // cannot accidentally fetch policy with a stale/absent header pair.
         api.setCredentials(token.uid, token.value)
+        val campusUnid = selectUnid.toIntOrNull() ?: 0
 
         val policyPath = if (mode == INDOOR_MODE) INDOOR_POLICY_PATH else RUN_POLICY_PATH
         val policy = api.post(
@@ -40,7 +49,7 @@ class PolicyClient(val api: ApiClient) {
                 put("runMode", mode)
                 put("ruleUpdateTime", 0)
                 put("geoFenceUpdateTime", 0)
-                put("selectUnid", token.unid.toIntOrNull() ?: 0)
+                put("selectUnid", campusUnid)
                 put("operateType", 0)
             },
         )
@@ -59,7 +68,7 @@ class PolicyClient(val api: ApiClient) {
             base.optionalPoints.isEmpty()
         ) {
             val anchor = parseCheckpointAnchor(fence) ?: LatLng(NO_FENCE_ANCHOR_DEG, NO_FENCE_ANCHOR_DEG)
-            val checkpoints = fetchCheckpoints(token, base.minDistancePerRunM, anchor)
+            val checkpoints = fetchCheckpoints(token, base.minDistancePerRunM, anchor, campusUnid)
             if (checkpoints.required.isNotEmpty() || checkpoints.optional.isNotEmpty()) {
                 return base.copy(
                     requiredPoints = checkpoints.required,
@@ -81,7 +90,7 @@ class PolicyClient(val api: ApiClient) {
      * `last_checkpoint_error` and returns `[]` rather than failing the run flow; only
      * transport failures propagate (they already aborted the two calls before this one).
      */
-    private fun fetchCheckpoints(token: Token, distanceM: Int, anchor: LatLng): Checkpoints {
+    private fun fetchCheckpoints(token: Token, distanceM: Int, anchor: LatLng, selectUnid: Int): Checkpoints {
         val path = "$CHECKPOINT_PATH_PREFIX$distanceM"
         val sign = md5Hex(CHECKPOINT_SIGN_ORIGIN + path + CHECKPOINT_SIGN_SALT)
         val payload = api.post(
@@ -89,7 +98,7 @@ class PolicyClient(val api: ApiClient) {
             buildJsonObject {
                 put("longitude", anchor.lng)
                 put("latitude", anchor.lat)
-                put("selectedUnid", token.unid.toIntOrNull() ?: 0)
+                put("selectedUnid", selectUnid)
                 put("uuid", UUID.randomUUID().toString())
                 put("runec", "")
                 put("runAreaId", -1)

@@ -1,6 +1,8 @@
 package dev.campusrun.app.home
 
 import dev.campusrun.core.config.RemoteVersionInfo
+import dev.campusrun.core.campus.CampusOption
+import dev.campusrun.core.campus.CampusSelectionStore
 import dev.campusrun.core.policy.LatLng
 import dev.campusrun.core.policy.RunPolicy
 import dev.campusrun.core.profile.UserProfile
@@ -367,6 +369,149 @@ class HomeViewModelTest {
         assertEquals(0, data.semesterCalls, "the semester leg must not start after logout either")
     }
 
+    @Test
+    fun `campus list - two campuses surface and the platform's selected campus drives the policy unid`() {
+        val data = FakeHomeData(policy(), campuses = CAMPUS_LIST)
+        val vm = HomeViewModel(data, TOKEN, CURRENT_VERSION, DIRECT, FakeSecureStore())
+
+        vm.refresh()
+
+        assertEquals(2, vm.state.campuses.size, "the account's campuses must surface")
+        assertTrue(campusSwitchable(vm.state.campuses), "two campuses are a real choice")
+        assertEquals(35102, vm.state.selectedCampusUnid, "the platform's isSelected campus is in effect")
+        assertEquals(listOf("35102"), data.policyUnids, "the rule must be read for that campus (selectUnid)")
+    }
+
+    @Test
+    fun `campus switch - picking another campus persists it and re-reads the policy for it`() {
+        val selection = FakeCampusSelection()
+        val data = FakeHomeData(policy(), campuses = CAMPUS_LIST)
+        val vm = HomeViewModel(
+            data,
+            TOKEN,
+            CURRENT_VERSION,
+            DIRECT,
+            FakeSecureStore(),
+            campusSelection = selection,
+        )
+
+        vm.refresh()
+        vm.selectCampus(35103)
+
+        assertEquals("35103", selection.value, "the choice must survive a refresh or an app restart")
+        assertEquals(35103, vm.state.selectedCampusUnid, "the switch must land in the state the UI reads")
+        assertEquals(listOf("35102", "35103"), data.policyUnids, "the switch re-reads the rule for the new campus")
+        assertEquals(2, vm.state.campuses.size, "the menu stays the account's own campuses")
+    }
+
+    @Test
+    fun `campus switch - an id outside the account's own campuses is ignored`() {
+        val selection = FakeCampusSelection()
+        val data = FakeHomeData(policy(), campuses = CAMPUS_LIST)
+        val vm = HomeViewModel(
+            data,
+            TOKEN,
+            CURRENT_VERSION,
+            DIRECT,
+            FakeSecureStore(),
+            campusSelection = selection,
+        )
+
+        vm.refresh()
+        vm.selectCampus(99999)
+
+        assertNull(selection.value, "no blind write: only the listed campuses may be chosen")
+        assertEquals(35102, vm.state.selectedCampusUnid, "the effect stays where it was")
+        assertEquals(1, data.policyUnids.size, "an ignored selection must not trigger a reload")
+    }
+
+    @Test
+    fun `single campus - the header stays a plain line with no dropdown state`() {
+        val data = FakeHomeData(policy(), campuses = CAMPUS_LIST.take(1))
+        val vm = HomeViewModel(data, TOKEN, CURRENT_VERSION, DIRECT, FakeSecureStore())
+
+        vm.refresh()
+
+        assertFalse(campusSwitchable(vm.state.campuses), "one campus must never render a menu")
+        assertEquals(35102, vm.state.selectedCampusUnid, "the only campus is still the one in effect")
+    }
+
+    @Test
+    fun `campus list failure - the refresh still lands and the persisted choice still applies`() {
+        // Best-effort like the profile leg: a thrown zonelist error must not strand the
+        // risk-control facts, and a transient failure must not silently move the rule
+        // back to another campus.
+        val selection = FakeCampusSelection(value = "35103")
+        val data = FakeHomeData(policy(), campusFailure = true)
+        val vm = HomeViewModel(
+            data,
+            TOKEN,
+            CURRENT_VERSION,
+            DIRECT,
+            FakeSecureStore(),
+            campusSelection = selection,
+        )
+
+        vm.refresh()
+
+        assertFalse(vm.state.loading, "a campus failure must not strand the refresh")
+        assertNull(vm.state.error, "a best-effort leg failure must not raise the error banner")
+        assertTrue(vm.state.rules.isNotEmpty(), "rules must still render")
+        assertEquals(emptyList<CampusOption>(), vm.state.campuses, "no answer -> no menu state")
+        assertEquals(listOf("35103"), data.policyUnids, "the persisted choice keeps applying")
+        assertEquals("35103", selection.value, "the failure must not clear the user's choice")
+    }
+
+    @Test
+    fun `stale campus choice - dropped once the platform stops listing it`() {
+        val selection = FakeCampusSelection(value = "99999")
+        val data = FakeHomeData(policy(), campuses = CAMPUS_LIST)
+        val vm = HomeViewModel(
+            data,
+            TOKEN,
+            CURRENT_VERSION,
+            DIRECT,
+            FakeSecureStore(),
+            campusSelection = selection,
+        )
+
+        vm.refresh()
+
+        assertNull(selection.value, "a choice the platform no longer offers must self-heal")
+        assertEquals(listOf("35102"), data.policyUnids, "the platform's own campus takes over")
+    }
+
+    @Test
+    fun `logout - clears the persisted campus choice with the session`() {
+        val selection = FakeCampusSelection(value = "35103")
+        val vm = HomeViewModel(
+            FakeHomeData(policy(), campuses = CAMPUS_LIST),
+            TOKEN,
+            CURRENT_VERSION,
+            DIRECT,
+            FakeSecureStore(),
+            campusSelection = selection,
+        )
+
+        vm.logout()
+
+        assertEquals(1, selection.clears, "the choice is per-account and drops with the session")
+        assertNull(selection.value)
+    }
+
+    @Test
+    fun `campus helpers - a real choice, and a missing list keeps the stored choice`() {
+        assertFalse(campusSwitchable(emptyList()), "no answer is never a menu")
+        assertFalse(campusSwitchable(CAMPUS_LIST.take(1)), "one campus is not a menu")
+        assertTrue(campusSwitchable(CAMPUS_LIST), "two campuses are a real choice")
+
+        assertEquals(35103, effectiveCampusUnid(35103, null), "a list failure keeps the persisted choice")
+        assertEquals(35102, effectiveCampusUnid(null, CAMPUS_LIST), "the platform's isSelected campus wins")
+        assertEquals(35102, effectiveCampusUnid(99999, CAMPUS_LIST), "an id the platform dropped is ignored")
+        assertNull(effectiveCampusUnid(null, emptyList()), "no campuses and no choice -> session default")
+        assertNull(effectiveCampusUnid(35103, emptyList()), "an empty list is a real answer: no override")
+    }
+
     /** Spec §5.5-6 display fixture — the live school's advertised rule (T2/T9 fixture). */
     private fun policy() = RunPolicy(
         requiredPoints = listOf(LatLng(34.7546, 113.6208)),
@@ -388,8 +533,16 @@ class HomeViewModelTest {
         private val profile: UserProfile? = null,
         private val serverCountedM: Int? = null,
         private val semesterFailure: Boolean = false,
+        private val campuses: List<CampusOption>? = null,
+        private val campusFailure: Boolean = false,
     ) : HomeData {
-        override fun fetchPolicy(token: Token): RunPolicy = policy
+        /** Every unid the policy leg was asked to read — pins which campus's rule was fetched. */
+        val policyUnids = mutableListOf<String>()
+
+        override fun fetchPolicy(token: Token): RunPolicy {
+            policyUnids += token.unid
+            return policy
+        }
 
         override fun fetchProfile(token: Token): UserProfile? = profile
 
@@ -397,6 +550,25 @@ class HomeViewModelTest {
 
         override fun fetchCountedSemester(token: Token): Int? =
             if (semesterFailure) throw java.io.IOException("semester transport failed") else serverCountedM
+
+        override fun fetchCampuses(token: Token): List<CampusOption>? =
+            if (campusFailure) throw java.io.IOException("campus transport failed") else campuses
+    }
+
+    /** [CampusSelectionStore] fake: records the persisted choice like the Android impl. */
+    private class FakeCampusSelection(var value: String? = null) : CampusSelectionStore {
+        var clears = 0
+
+        override fun load(): String? = value
+
+        override fun save(unid: String) {
+            value = unid
+        }
+
+        override fun clear() {
+            clears++
+            value = null
+        }
     }
 
     /**
@@ -460,5 +632,11 @@ class HomeViewModelTest {
         const val PAST_MS = 1795000000000L
 
         val DIRECT = Executor { it.run() }
+
+        /** Two dummy campuses (the upstream `MyCampusBean` field set, no live PII). */
+        val CAMPUS_LIST = listOf(
+            CampusOption(unid = 35102, name = "示例校区A", allowChange = true, isSelected = true),
+            CampusOption(unid = 35103, name = "示例校区B", allowChange = true, isSelected = false),
+        )
     }
 }
