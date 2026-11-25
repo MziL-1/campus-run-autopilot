@@ -285,6 +285,16 @@ internal fun executeRun(
     // geometry from the issued checkpoints. The REAL policy still drives validation
     // (empty fence -> no 出围栏 rule) and settlement — nothing fence-derived is submitted.
     val checkpoints = policy.requiredPoints + policy.optionalPoints
+
+    // Friendly precondition gate (parity with the App's RunViewModel; 11-25 incident): a
+    // five-point answer that came back EMPTY on a no-fence school leaves no geometry to
+    // synthesize, so refuse HERE — Chinese, actionable, counts logged — instead of the
+    // synthesizer's English `require`, and before any upload/settle leg.
+    synthGeometryRefusal(policy)?.let { message ->
+        log(noGeometryDiagnosis(policy, checkpoints))
+        throw StageFailure("synth", message)
+    }
+
     val geometryFence = when {
         policy.fence.size >= 3 -> policy.fence
         checkpoints.isNotEmpty() -> deriveFence(checkpoints)
@@ -321,6 +331,14 @@ internal fun executeRun(
         try {
             TrackSynthesizer.synthesize(synthBase, distanceM, durationSec, seed)
         } catch (requiredOnly: IllegalArgumentException) {
+            // Belt and suspenders: the gate above makes the empty-geometry case
+            // unreachable here — detect it STRUCTURALLY (the fence handed to synthesis
+            // has < 3 points) rather than pattern-matching the synthesizer's English
+            // require text, so its raw wording can never reach the operator's output.
+            if (geometryFence.size < 3) {
+                log(noGeometryDiagnosis(policy, checkpoints))
+                throw StageFailure("synth", NO_GEOMETRY_MESSAGE)
+            }
             throw StageFailure("synth", requiredOnly.message ?: "fence/checkpoint geometry cannot host the run")
         }
     }
@@ -383,6 +401,37 @@ private fun settleRrid(response: JsonElement): String? {
         ?: (data["id"] as? JsonPrimitive)?.contentOrNull?.takeIf { it != "null" }
     return rrid
 }
+
+/**
+ * Friendly pre-synthesis refusal for the 11-25 empty-geometry incident: a school with NO
+ * server polygon (geoFences absent) derives synthesis geometry from the issued
+ * checkpoints, so `fence < 3 points AND no checkpoints` means there is nothing to
+ * inscribe a loop in. Returns the actionable Chinese message, or `null` when synthesis
+ * has geometry to work with (a real polygon, or checkpoints to derive one from) — the
+ * same structural condition as the App's `RunViewModel` gate. Pure so it is testable
+ * offline (`executeRun` itself needs the live protocol).
+ */
+internal fun synthGeometryRefusal(policy: RunPolicy): String? =
+    if (policy.fence.size < 3 && (policy.requiredPoints + policy.optionalPoints).isEmpty()) {
+        NO_GEOMETRY_MESSAGE
+    } else {
+        null
+    }
+
+/** Diagnosis line for the refusal: what the pipeline saw (counts + advertised window). */
+private fun noGeometryDiagnosis(policy: RunPolicy, checkpoints: List<LatLng>): String =
+    "synth: REFUSED — fence ${policy.fence.size} points, checkpoints ${checkpoints.size}, " +
+        "window ${policy.validFromHour}-${policy.validToHour} h (no geometry to synthesize)"
+
+/**
+ * The refusal sentence itself — names the cause (no polygon → checkpoints required), the
+ * likely reasons (transient five-point failure, or outside the issue window) and the
+ * retry action. The App's `RunViewModel.NO_GEOMETRY_MESSAGE` carries the same sentence
+ * (its tail points at the Home refresh button, which the CLI has no equivalent of).
+ */
+private const val NO_GEOMETRY_MESSAGE =
+    "点位数据未获取到（学校无围栏，合成需要至少 3 个点位）——" +
+        "可能是网络瞬时失败或不在下发时段，请稍后重试"
 
 /**
  * Bounding-box polygon (+padding) around the issued checkpoints, for schools that

@@ -3,6 +3,7 @@ package dev.campusrun.app.run
 import dev.campusrun.app.session.SessionEpoch
 import dev.campusrun.core.campus.CampusSelectionStore
 import dev.campusrun.core.campus.InMemoryCampusSelectionStore
+import dev.campusrun.core.policy.LatLng
 import dev.campusrun.core.policy.RunPolicy
 import dev.campusrun.core.policy.RunPolicyValidator
 import dev.campusrun.core.session.Token
@@ -287,10 +288,79 @@ class RunViewModelTest {
         assertEquals(listOf("90001"), fake.selectUnids, "no persisted choice -> the session unid")
     }
 
-    /** No advertised window (both hours 0) so the validator's wall-clock check cannot flake. */
-    private fun policy() = RunPolicy(
+    @Test
+    fun `empty geometry - no fence and no checkpoints fails early with a friendly message`() {
+        // 11-25 incident: geoFences absent (no server polygon) AND the five-point answer
+        // came back empty — the synthesizer's English `require` must never reach the UI,
+        // and nothing may leave the device before the refusal (no synthesis, no upload,
+        // no settle). The rule body is advertised (10-22 h) exactly as on the failed
+        // attempt, so the friendly gate — not the rule-body check — is what intervenes.
+        val logs = mutableListOf<String>()
+        val fake = FakeRunStages(
+            policy = policy(optionalPoints = emptyList()).copy(validFromHour = 10, validToHour = 22),
+            track = track(distanceM = 2030, durationSec = 760),
+        )
+        val vm = RunViewModel(fake, TOKEN, DIRECT, settleWaitMs = 0, log = { logs += it })
+
+        vm.startRun(distanceM = 2030, durationSec = 760)
+
+        val state = vm.state
+        assertTrue(state is RunState.Error, "empty geometry must refuse the run, got $state")
+        val message = (state as RunState.Error).message
+        assertTrue(message.contains("点位数据未获取到"), "friendly Chinese refusal required: $message")
+        assertTrue(message.contains("刷新规则与进度"), "the refusal must say how to retry: $message")
+        assertFalse(message.contains("fence must be a polygon"), "raw synthesizer require leaked: $message")
+        assertFalse(message.contains("轨迹合成失败"), "raw synth wrap leaked: $message")
+        // Diagnosis for 导出诊断: what the pipeline saw (fence/checkpoints/rule window).
+        assertTrue(
+            logs.any {
+                it.contains("synth: REFUSED") &&
+                    it.contains("fence 0 points") &&
+                    it.contains("checkpoints 0") &&
+                    it.contains("window 10-22 h")
+            },
+            "a diagnostic line carrying the counts is required, got: $logs",
+        )
+        assertEquals(0, fake.synthesizeCalls, "refuse before synthesis")
+        assertEquals(0, fake.uploadCalls, "refuse before any OBS upload")
+        assertEquals(0, fake.settleCalls, "refuse before save/record")
+    }
+
+    @Test
+    fun `empty fence with issued checkpoints - the derived-fence path still proceeds`() {
+        // Positive half of the incident: the live school has no polygon but its five-point
+        // answer DID return checkpoints — synthesis geometry derives from them and the run
+        // continues exactly as before (existing behavior, pinned against the new gate).
+        val logs = mutableListOf<String>()
+        val fake = FakeRunStages(
+            policy = policy(),
+            track = track(distanceM = 2030, durationSec = 760),
+            record = RunRecord(id = "9008", distanceM = 2030, valid = true, startTimeMs = PAST_MS),
+        )
+        val vm = RunViewModel(fake, TOKEN, DIRECT, settleWaitMs = 0, log = { logs += it })
+
+        vm.startRun(distanceM = 2030, durationSec = 760)
+
+        assertTrue(vm.state is RunState.Success, "checkpoints must keep the derived path alive: ${vm.state}")
+        assertEquals(1, fake.synthesizeCalls, "the derived fence must reach synthesis")
+        assertEquals(1, fake.uploadCalls, "the derived path must upload")
+        assertEquals(1, fake.settleCalls, "the derived path must settle")
+        assertTrue(
+            logs.any { it.contains("derived") },
+            "the derived-fence diagnosis must be logged, got: $logs",
+        )
+    }
+
+    /**
+     * No advertised window (both hours 0) so the validator's wall-clock check cannot flake.
+     *
+     * Fence stays empty like the live school (geoFences absent), while the five-point API
+     * HAS answered ([LIVE_CHECKPOINTS]) — that is the live derived-fence path. The 11-25
+     * incident fixture (no fence AND no checkpoints) passes `optionalPoints = emptyList()`.
+     */
+    private fun policy(optionalPoints: List<LatLng> = LIVE_CHECKPOINTS) = RunPolicy(
         requiredPoints = emptyList(),
-        optionalPoints = emptyList(),
+        optionalPoints = optionalPoints,
         fence = emptyList(),
         paceMinSecPerKm = 180,
         paceMaxSecPerKm = 600,
@@ -328,6 +398,14 @@ class RunViewModelTest {
         var uploadCalls = 0
             private set
 
+        /** Settle (save/record) legs — the empty-geometry refusal must keep this at 0. */
+        var settleCalls = 0
+            private set
+
+        /** Synthesis legs — the friendly gate must fire before the synthesizer ever runs. */
+        var synthesizeCalls = 0
+            private set
+
         override fun syncSkewMs(): Long = 0L
 
         /** Every `selectUnid` the policy leg was asked to read — pins the campus in effect. */
@@ -338,7 +416,10 @@ class RunViewModelTest {
             return policy
         }
 
-        override fun synthesize(policy: RunPolicy, distanceM: Int, durationSec: Int, seed: Long): List<TrackPoint> = track
+        override fun synthesize(policy: RunPolicy, distanceM: Int, durationSec: Int, seed: Long): List<TrackPoint> {
+            synthesizeCalls += 1
+            return track
+        }
 
         override fun upload(token: Token, track: List<TrackPoint>): UploadHandle {
             uploadCalls += 1
@@ -351,7 +432,10 @@ class RunViewModelTest {
             )
         }
 
-        override fun settle(policy: RunPolicy, track: List<TrackPoint>, handle: UploadHandle): String = "9001"
+        override fun settle(policy: RunPolicy, track: List<TrackPoint>, handle: UploadHandle): String {
+            settleCalls += 1
+            return "9001"
+        }
 
         override fun latestHistory(token: Token): RunRecord? {
             beforeLatestHistory?.invoke()
@@ -372,6 +456,9 @@ class RunViewModelTest {
         }
 
         const val METRES_PER_DEGREE_LNG = 111_194.9266
+
+        /** The live school's issued five-point answer: no server polygon, checkpoints only. */
+        val LIVE_CHECKPOINTS = List(5) { index -> LatLng(34.7546 + index * 0.0004, 113.6208) }
 
         /** 2025-10-09 12:00 +08 — always an earlier day than "now" in these tests. */
         const val PAST_MS = 1_760_000_000_000L

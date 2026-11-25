@@ -199,17 +199,27 @@ class RunViewModel(
 
             // Sanity fence for issued checkpoints (CLI port): refuse anchor-relative or
             // null-island coordinates before anything is synthesized.
-            val stray = (policy.requiredPoints + policy.optionalPoints)
+            val checkpoints = policy.requiredPoints + policy.optionalPoints
+            val stray = checkpoints
                 .firstOrNull { it.lat !in CHINA_MIN_LAT..CHINA_MAX_LAT || it.lng !in CHINA_MIN_LNG..CHINA_MAX_LNG }
             if (stray != null) {
                 fail("点位 $stray 超出合理地理范围，已拒绝合成与提交")
                 return
             }
 
+            // Friendly precondition gate (11-25 incident): a school with NO server polygon
+            // (geoFences absent) derives synthesis geometry from the issued checkpoints, so
+            // an EMPTY five-point answer leaves nothing to synthesize. Refuse HERE — in
+            // Chinese, with what was seen logged for 导出诊断 — before the synthesizer's
+            // English `require` (or any OBS/upload work) can surface. Parity: CLI `Main.kt`.
+            if (policy.fence.size < 3 && checkpoints.isEmpty()) {
+                refuseNoGeometry(policy, checkpoints)
+                return
+            }
+
             // No server-side polygon (geoFences = null, the live school): derive synthesis
             // geometry from the issued checkpoints. Validation still runs against the REAL
             // policy and settlement never sees the derived fence (CLI port).
-            val checkpoints = policy.requiredPoints + policy.optionalPoints
             val geometryFence = when {
                 policy.fence.size >= 3 -> policy.fence
                 checkpoints.isNotEmpty() -> deriveFence(checkpoints)
@@ -236,7 +246,16 @@ class RunViewModel(
                 try {
                     stages.synthesize(synthBase, distanceM, durationSec, seed)
                 } catch (requiredOnly: IllegalArgumentException) {
-                    fail("轨迹合成失败：${requiredOnly.message ?: "围栏/点位几何无法容纳本次跑步"}")
+                    // Belt and suspenders: the gate above makes the empty-geometry case
+                    // unreachable here, so this branch stays a backstop. Detect it
+                    // STRUCTURALLY (fence handed to synthesis < 3 points) instead of
+                    // pattern-matching the synthesizer's English require text — a wording
+                    // change upstream can never re-leak raw English into the UI.
+                    if (geometryFence.size < 3) {
+                        refuseNoGeometry(policy, checkpoints)
+                    } else {
+                        fail("轨迹合成失败：${requiredOnly.message ?: "围栏/点位几何无法容纳本次跑步"}")
+                    }
                     return
                 }
             }
@@ -327,6 +346,22 @@ class RunViewModel(
         return true
     }
 
+    /**
+     * Terminal refusal for the empty-geometry case (no server polygon AND no issued
+     * checkpoints). Logs **what the pipeline saw** — fence point count, checkpoint count,
+     * advertised rule window — through [log] (MainActivity routes it into [RedactedLog],
+     * so a later 导出诊断 can tell a transient five-point failure from an out-of-window
+     * rule), then surfaces the actionable Chinese message instead of the synthesizer's
+     * raw English `require`.
+     */
+    private fun refuseNoGeometry(policy: RunPolicy, checkpoints: List<LatLng>) {
+        log(
+            "synth: REFUSED — fence ${policy.fence.size} points, checkpoints ${checkpoints.size}, " +
+                "window ${policy.validFromHour}-${policy.validToHour} h (no geometry to synthesize)",
+        )
+        fail(NO_GEOMETRY_MESSAGE)
+    }
+
     /** Terminal refusal/failure: records the outcome for the diagnostic export, then shows it. */
     private fun fail(message: String) {
         RecentResults.add("一键跑：$message")
@@ -348,6 +383,18 @@ class RunViewModel(
     }
 
     private companion object {
+        /**
+         * Friendly refusal when there is no synthesis geometry at all (fence < 3 points
+         * AND no issued checkpoints) — the 11-25 incident, where the raw English
+         * `fence must be a polygon of at least 3 points, got 0` leaked into the UI.
+         * Names the cause (school has no polygon → checkpoints required), the likely
+         * reasons (transient five-point failure, or outside the issue window) and the
+         * retry action. CLI `Main.kt` carries the same sentence for parity.
+         */
+        const val NO_GEOMETRY_MESSAGE =
+            "点位数据未获取到（学校无围栏，合成需要至少 3 个点位）——" +
+                "可能是网络瞬时失败或不在下发时段，请稍后点“刷新规则与进度”重试"
+
         /** Date shape of the objective read-back row (same as Home's history rows). */
         val ROW_DATE_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("MM-dd HH:mm")
 
